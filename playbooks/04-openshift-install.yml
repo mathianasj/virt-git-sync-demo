@@ -7,6 +7,10 @@
   vars_files:
     - /tmp/selected-domain.yml
   pre_tasks:
+    - name: Load global variables
+      include_vars:
+        file: "{{ playbook_dir }}/../group_vars/all.yml"
+
     - name: Update clusters configuration with selected domain
       set_fact:
         clusters: |

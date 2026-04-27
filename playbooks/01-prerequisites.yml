@@ -4,6 +4,10 @@
   gather_facts: yes
   become: no
   tasks:
+    - name: Load global variables
+      include_vars:
+        file: "{{ playbook_dir }}/../group_vars/all.yml"
+
     - name: Check for AWS credentials
       command: aws sts get-caller-identity
       register: aws_identity
