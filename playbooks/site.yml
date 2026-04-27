@@ -3,20 +3,42 @@
   hosts: localhost
   gather_facts: yes
   vars_prompt:
-    - name: openshift_pull_secret
-      prompt: "Enter your OpenShift pull secret (paste JSON)"
-      private: yes
+    - name: pull_secret_path
+      prompt: "Enter path to your OpenShift pull secret file"
+      private: no
+      default: "./pull-secret.json"
 
   tasks:
+    - name: Check if pull secret file exists
+      stat:
+        path: "{{ pull_secret_path }}"
+      register: pull_secret_file
+
+    - name: Fail if pull secret file not found
+      fail:
+        msg: |
+          Pull secret file not found at: {{ pull_secret_path }}
+
+          Download your pull secret from:
+          https://console.redhat.com/openshift/install/pull-secret
+
+          Save it as pull-secret.json in this directory, then re-run.
+      when: not pull_secret_file.stat.exists
+
+    - name: Read pull secret from file
+      slurp:
+        src: "{{ pull_secret_path }}"
+      register: pull_secret_content
+      no_log: true
+
     - name: Validate pull secret format
-      assert:
-        that:
-          - openshift_pull_secret | from_json
-        fail_msg: "Invalid pull secret JSON format"
+      set_fact:
+        pull_secret_json: "{{ pull_secret_content.content | b64decode | from_json }}"
+      no_log: true
 
     - name: Save pull secret to temporary file
       copy:
-        content: "{{ openshift_pull_secret }}"
+        content: "{{ pull_secret_content.content | b64decode }}"
         dest: /tmp/pull-secret.json
         mode: '0600'
       no_log: true

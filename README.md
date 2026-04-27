@@ -29,12 +29,16 @@ This project automates the complete deployment of:
 # 2. Activate virtual environment
 source venv/bin/activate
 
-# 3. Configure AWS credentials
+# 3. Download OpenShift pull secret
+# Get it from: https://console.redhat.com/openshift/install/pull-secret
+# Save as: pull-secret.json
+
+# 4. Configure AWS credentials
 export AWS_ACCESS_KEY_ID="your-key"
 export AWS_SECRET_ACCESS_KEY="your-secret"
 export AWS_DEFAULT_REGION="us-east-1"
 
-# 4. Run deployment
+# 5. Run deployment
 ansible-playbook -i inventory/hosts.yml playbooks/site.yml
 ```
 

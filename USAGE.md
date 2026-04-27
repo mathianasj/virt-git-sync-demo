@@ -36,7 +36,13 @@ This guide explains how to use the Ansible playbooks to deploy two OpenShift 4.2
    export AWS_DEFAULT_REGION="us-east-1"
    ```
 
-4. **OpenShift pull secret** from https://console.redhat.com/openshift/install/pull-secret
+4. **OpenShift pull secret** saved to a file
+   ```bash
+   # Download from: https://console.redhat.com/openshift/install/pull-secret
+   # Save it as pull-secret.json in the project directory
+   
+   # The playbook will prompt for the file path (default: ./pull-secret.json)
+   ```
 
 ### Verify Installation
 
@@ -68,10 +74,17 @@ Before running, review and customize these files:
 Deploy everything with a single command:
 
 ```bash
+# First, save your pull secret to a file
+# Download from: https://console.redhat.com/openshift/install/pull-secret
+# Save as: pull-secret.json (in project directory)
+
+# Run the deployment
 ansible-playbook -i inventory/hosts.yml playbooks/site.yml
 ```
 
-You will be prompted to paste your OpenShift pull secret.
+You will be prompted for the path to your pull secret file (default: `./pull-secret.json`).
+
+**Note:** An example format is provided in `pull-secret.json.example` for reference.
 
 ### Phase-by-Phase Deployment
 

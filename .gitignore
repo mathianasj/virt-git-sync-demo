@@ -32,6 +32,9 @@ Thumbs.db
 *.pem
 *.key
 !*.key.example
+!pull-secret.json.example
+pull-secret.json
+pull-secret.txt
 
 # Temporary files
 *.tmp
