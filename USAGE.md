@@ -6,31 +6,49 @@ This guide explains how to use the Ansible playbooks to deploy two OpenShift 4.2
 
 ### Local Machine Requirements
 
-1. **Ansible** 2.9 or higher
+1. **Python 3.6+** installed
    ```bash
-   ansible --version
+   python3 --version
    ```
 
-2. **Python dependencies**
+2. **Setup virtual environment and dependencies** (recommended)
    ```bash
-   pip3 install boto3 botocore kubernetes
+   # Run the setup script (creates venv and installs everything)
+   ./setup.sh
+   
+   # Activate the virtual environment
+   source venv/bin/activate
+   
+   # Or use the helper script
+   source activate
    ```
 
-3. **Ansible collections**
+   **Alternative: Manual installation** (if not using venv)
    ```bash
-   ansible-galaxy collection install amazon.aws
-   ansible-galaxy collection install kubernetes.core
-   ansible-galaxy collection install community.general
+   pip3 install -r requirements.txt
+   ansible-galaxy collection install amazon.aws kubernetes.core community.general
    ```
 
-4. **AWS credentials** configured
+3. **AWS credentials** configured
    ```bash
    export AWS_ACCESS_KEY_ID="your-access-key"
    export AWS_SECRET_ACCESS_KEY="your-secret-key"
    export AWS_DEFAULT_REGION="us-east-1"
    ```
 
-5. **OpenShift pull secret** from https://console.redhat.com/openshift/install/pull-secret
+4. **OpenShift pull secret** from https://console.redhat.com/openshift/install/pull-secret
+
+### Verify Installation
+
+```bash
+# Activate venv if using it
+source venv/bin/activate
+
+# Check versions
+ansible --version
+python -c "import boto3; print('boto3:', boto3.__version__)"
+python -c "import kubernetes; print('kubernetes:', kubernetes.__version__)"
+```
 
 ### Configuration
 

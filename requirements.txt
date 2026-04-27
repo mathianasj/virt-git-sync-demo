@@ -1,0 +1,11 @@
+# Python dependencies for Ansible playbooks
+ansible>=2.9,<10.0
+boto3>=1.26.0
+botocore>=1.29.0
+kubernetes>=12.0.0
+openshift>=0.12.0
+jmespath>=1.0.0
+
+# Ansible collections dependencies
+jinja2>=3.0.0
+PyYAML>=5.4.0

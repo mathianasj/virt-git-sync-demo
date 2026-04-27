@@ -1,0 +1,15 @@
+#!/bin/bash
+# Quick activation helper for the virtual environment
+
+if [ ! -d "venv" ]; then
+    echo "Virtual environment not found!"
+    echo "Run ./setup.sh first to create the environment"
+    exit 1
+fi
+
+echo "Activating virtual environment..."
+source venv/bin/activate
+
+echo "Virtual environment activated!"
+echo "Python: $(which python)"
+echo "Ansible: $(ansible --version | head -1)"

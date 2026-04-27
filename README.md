@@ -23,16 +23,18 @@ This project automates the complete deployment of:
 ## Quick Start
 
 ```bash
-# Install prerequisites
-ansible-galaxy collection install amazon.aws kubernetes.core community.general
-pip3 install boto3 botocore kubernetes
+# 1. Setup Python virtual environment and install dependencies
+./setup.sh
 
-# Configure AWS credentials
+# 2. Activate virtual environment
+source venv/bin/activate
+
+# 3. Configure AWS credentials
 export AWS_ACCESS_KEY_ID="your-key"
 export AWS_SECRET_ACCESS_KEY="your-secret"
 export AWS_DEFAULT_REGION="us-east-1"
 
-# Run deployment
+# 4. Run deployment
 ansible-playbook -i inventory/hosts.yml playbooks/site.yml
 ```
 
@@ -97,11 +99,12 @@ See [USAGE.md](USAGE.md) for detailed instructions.
 
 ## Prerequisites
 
-- Ansible 2.9+
-- Python 3.6+ with boto3, botocore, kubernetes
+- Python 3.6+
 - AWS credentials with appropriate permissions
 - **Route53 public hosted zone** (playbook auto-discovers from your AWS account)
 - OpenShift pull secret from Red Hat
+
+**Note:** Run `./setup.sh` to automatically create a Python virtual environment and install all required dependencies (Ansible, boto3, kubernetes, etc.)
 
 ## Configuration
 
