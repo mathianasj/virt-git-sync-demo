@@ -4,12 +4,16 @@
   gather_facts: yes
   become: no
   vars_prompt:
-    - name: pull_secret_path
+    - name: pull_secret_path_input
       prompt: "Enter path to your OpenShift pull secret file"
       private: no
-      default: "./pull-secret.json"
+      default: "pull-secret.json"
 
   tasks:
+    - name: Resolve pull secret path
+      set_fact:
+        pull_secret_path: "{{ pull_secret_path_input if pull_secret_path_input.startswith('/') else (playbook_dir + '/../' + pull_secret_path_input) | realpath }}"
+
     - name: Check if pull secret file exists
       stat:
         path: "{{ pull_secret_path }}"
