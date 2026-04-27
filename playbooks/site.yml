@@ -2,6 +2,7 @@
 - name: Dual OpenShift Cluster Deployment with ACM - Initialization
   hosts: localhost
   gather_facts: yes
+  become: no
   vars_prompt:
     - name: pull_secret_path
       prompt: "Enter path to your OpenShift pull secret file"
@@ -70,6 +71,7 @@
 - name: Deployment Summary
   hosts: localhost
   gather_facts: no
+  become: no
   vars_files:
     - /tmp/selected-domain.yml
   pre_tasks:

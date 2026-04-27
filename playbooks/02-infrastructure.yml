@@ -2,6 +2,7 @@
 - name: Phase 2 - AWS Infrastructure Setup
   hosts: localhost
   gather_facts: no
+  become: no
   vars_files:
     - /tmp/selected-domain.yml
   pre_tasks:

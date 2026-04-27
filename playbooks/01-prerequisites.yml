@@ -2,6 +2,7 @@
 - name: Phase 1 - Prerequisites Check
   hosts: localhost
   gather_facts: yes
+  become: no
   tasks:
     - name: Check for AWS credentials
       command: aws sts get-caller-identity
