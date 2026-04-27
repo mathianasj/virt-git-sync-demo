@@ -1,0 +1,98 @@
+---
+# AWS Configuration
+aws_region: us-east-1
+aws_availability_zones:
+  - us-east-1a
+  - us-east-1b
+  - us-east-1c
+
+# VPC Configuration
+vpc_name: ocp-dual-cluster-vpc
+vpc_cidr: 10.0.0.0/16
+public_subnets:
+  - cidr: 10.0.1.0/24
+    az: us-east-1a
+  - cidr: 10.0.2.0/24
+    az: us-east-1b
+  - cidr: 10.0.3.0/24
+    az: us-east-1c
+private_subnets:
+  - cidr: 10.0.11.0/24
+    az: us-east-1a
+  - cidr: 10.0.12.0/24
+    az: us-east-1b
+  - cidr: 10.0.13.0/24
+    az: us-east-1c
+
+# Bastion Configuration
+bastion_instance_type: t3.medium
+bastion_ami: ami-0c101f26f147fa7fd  # RHEL 9 us-east-1
+bastion_key_name: ocp-bastion-key
+bastion_user: ec2-user
+
+# OpenShift Configuration
+openshift_version: "4.20"
+openshift_install_url: "https://mirror.openshift.com/pub/openshift-v4/clients/ocp/stable-4.20/openshift-install-linux.tar.gz"
+openshift_client_url: "https://mirror.openshift.com/pub/openshift-v4/clients/ocp/stable-4.20/openshift-client-linux.tar.gz"
+
+# Cluster Configuration
+clusters:
+  - name: hub-cluster
+    base_domain: example.com
+    cluster_name: hub
+    install_dir: /root/cluster-hub
+    tmux_session: hub-install
+    machine_network: 10.0.0.0/16
+    control_plane:
+      instance_type: m5.xlarge
+      replicas: 3
+    compute:
+      instance_type: m5.2xlarge
+      replicas: 3
+
+  - name: managed-cluster
+    base_domain: example.com
+    cluster_name: managed
+    install_dir: /root/cluster-managed
+    tmux_session: managed-install
+    machine_network: 10.0.0.0/16
+    control_plane:
+      instance_type: m5.xlarge
+      replicas: 3
+    compute:
+      instance_type: m5.2xlarge
+      replicas: 3
+
+# Bare Metal Configuration
+bare_metal_instance_type: c5.metal
+bare_metal_replicas: 2
+bare_metal_machineset_name: metal-workers
+
+# ACM Configuration
+acm_namespace: open-cluster-management
+acm_operator_channel: release-2.12
+acm_operator_source: redhat-operators
+acm_operator_name: advanced-cluster-management
+
+# OpenShift Virtualization Configuration
+cnv_namespace: openshift-cnv
+cnv_operator_channel: stable
+cnv_policy_namespace: cnv-policies
+
+# Gitea Configuration
+gitea_namespace: gitea
+gitea_chart_repo: https://dl.gitea.io/charts/
+gitea_chart_name: gitea
+gitea_chart_version: "10.1.0"
+gitea_admin_user: gitea_admin
+gitea_admin_password: ChangeMe123!
+gitea_storage_size: 10Gi
+
+# State Tracking
+state_file: /root/.ocp-deployment-state.json
+log_file: /var/log/ocp-deployment.log
+
+# Timeouts
+installation_timeout_minutes: 90
+operator_timeout_minutes: 15
+machineset_timeout_minutes: 30

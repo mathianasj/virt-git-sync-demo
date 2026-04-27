@@ -1,0 +1,46 @@
+replicaCount: 1
+
+image:
+  repository: gitea/gitea
+  tag: "1.21"
+  pullPolicy: IfNotPresent
+
+service:
+  http:
+    type: ClusterIP
+    port: 3000
+
+ingress:
+  enabled: false
+
+persistence:
+  enabled: true
+  size: {{ gitea_storage_size }}
+  storageClass: gp3-csi
+
+gitea:
+  admin:
+    username: {{ gitea_admin_user }}
+    password: {{ gitea_admin_password }}
+    email: admin@example.com
+
+  config:
+    database:
+      DB_TYPE: sqlite3
+    session:
+      PROVIDER: memory
+    cache:
+      ADAPTER: memory
+    server:
+      DOMAIN: gitea-{{ gitea_namespace }}.apps.{{ clusters[0].cluster_name }}.{{ clusters[0].base_domain }}
+      ROOT_URL: https://gitea-{{ gitea_namespace }}.apps.{{ clusters[0].cluster_name }}.{{ clusters[0].base_domain }}
+      PROTOCOL: http
+      HTTP_PORT: 3000
+    security:
+      INSTALL_LOCK: true
+
+postgresql:
+  enabled: false
+
+redis:
+  enabled: false

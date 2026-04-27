@@ -1,0 +1,21 @@
+---
+- name: Include import generation tasks
+  include_tasks: generate_import.yml
+
+- name: Include import application tasks
+  include_tasks: apply_import.yml
+
+- name: Wait for managed cluster to be available
+  shell: |
+    oc get managedcluster {{ managed_cluster_name }} -o jsonpath='{.status.conditions[?(@.type=="ManagedClusterConditionAvailable")].status}'
+  environment:
+    KUBECONFIG: "{{ hub_kubeconfig }}"
+  register: cluster_status
+  until: cluster_status.stdout == "True"
+  retries: 20
+  delay: 30
+  changed_when: false
+
+- name: Display import status
+  debug:
+    msg: "Managed cluster {{ managed_cluster_name }} successfully imported and available"

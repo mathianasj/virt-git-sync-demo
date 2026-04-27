@@ -1,0 +1,49 @@
+---
+- name: Create cluster working directories
+  file:
+    path: "{{ item.install_dir }}"
+    state: directory
+    mode: '0755'
+  loop: "{{ clusters }}"
+
+- name: Copy pull secret to bastion
+  copy:
+    src: /tmp/pull-secret.json
+    dest: /root/pull-secret.json
+    mode: '0600'
+
+- name: Generate SSH key pair for OpenShift
+  openssh_keypair:
+    path: /root/.ssh/openshift-key
+    type: rsa
+    size: 4096
+    state: present
+  register: ssh_key
+
+- name: Create state tracking file
+  copy:
+    content: |
+      {
+        "deployment_started": "{{ ansible_date_time.iso8601 }}",
+        "clusters": {}
+      }
+    dest: "{{ state_file }}"
+    mode: '0644'
+    force: no
+
+- name: Create log directory
+  file:
+    path: "{{ log_file | dirname }}"
+    state: directory
+    mode: '0755'
+
+- name: Initialize log file
+  copy:
+    content: |
+      ========================================
+      OpenShift Dual Cluster Deployment Log
+      Started: {{ ansible_date_time.iso8601 }}
+      ========================================
+    dest: "{{ log_file }}"
+    mode: '0644'
+    force: no

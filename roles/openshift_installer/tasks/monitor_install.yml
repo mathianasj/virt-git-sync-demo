@@ -1,0 +1,61 @@
+---
+- name: Monitor OpenShift installation progress
+  block:
+    - name: Check installation status via tmux
+      shell: |
+        if tmux has-session -t {{ tmux_session }} 2>/dev/null; then
+          tmux capture-pane -t {{ tmux_session }} -p | tail -50
+        else
+          echo "TMUX_SESSION_NOT_FOUND"
+        fi
+      register: install_status
+      until: >
+        'Install complete!' in install_status.stdout or
+        'failed' in install_status.stdout.lower() or
+        'error' in install_status.stdout.lower() or
+        'TMUX_SESSION_NOT_FOUND' in install_status.stdout or
+        existing_cluster.stat.exists
+      retries: "{{ (installation_timeout_minutes | int) }}"
+      delay: 60
+      changed_when: false
+
+    - name: Check if tmux session disappeared (installation complete)
+      shell: tmux has-session -t {{ tmux_session }} 2>/dev/null
+      register: tmux_check_final
+      failed_when: false
+      changed_when: false
+
+    - name: Verify kubeconfig was created
+      stat:
+        path: "{{ install_dir }}/auth/kubeconfig"
+      register: final_kubeconfig
+
+    - name: Fail if installation did not complete successfully
+      fail:
+        msg: "OpenShift installation for {{ cluster_name }} failed. Check {{ install_dir }}/install.log"
+      when:
+        - not final_kubeconfig.stat.exists
+        - "'failed' in install_status.stdout.lower() or 'error' in install_status.stdout.lower()"
+
+    - name: Display installation completion
+      debug:
+        msg:
+          - "OpenShift cluster {{ cluster_name }} installation complete!"
+          - "Kubeconfig: {{ install_dir }}/auth/kubeconfig"
+          - "Kubeadmin password: {{ install_dir }}/auth/kubeadmin-password"
+
+    - name: Read kubeadmin password
+      slurp:
+        src: "{{ install_dir }}/auth/kubeadmin-password"
+      register: kubeadmin_pass
+
+    - name: Log installation completion
+      shell: |
+        echo "$(date '+%Y-%m-%d %H:%M:%S') - OpenShift installation for {{ cluster_name }} completed successfully" >> {{ log_file }}
+
+  when: not (existing_cluster.stat.exists | default(false))
+
+- name: Use existing cluster
+  debug:
+    msg: "Using existing cluster {{ cluster_name }} at {{ install_dir }}"
+  when: existing_cluster.stat.exists

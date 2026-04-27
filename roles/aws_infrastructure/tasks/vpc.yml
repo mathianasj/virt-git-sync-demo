@@ -1,0 +1,107 @@
+---
+- name: Create VPC
+  amazon.aws.ec2_vpc_net:
+    name: "{{ vpc_name }}"
+    cidr_block: "{{ vpc_cidr }}"
+    region: "{{ aws_region }}"
+    tags:
+      Name: "{{ vpc_name }}"
+      Project: openshift-dual-cluster
+    state: present
+  register: vpc
+
+- name: Set VPC ID fact
+  set_fact:
+    vpc_id: "{{ vpc.vpc.id }}"
+
+- name: Create internet gateway
+  amazon.aws.ec2_vpc_igw:
+    vpc_id: "{{ vpc_id }}"
+    region: "{{ aws_region }}"
+    tags:
+      Name: "{{ vpc_name }}-igw"
+      Project: openshift-dual-cluster
+    state: present
+  register: igw
+
+- name: Create public subnets
+  amazon.aws.ec2_vpc_subnet:
+    vpc_id: "{{ vpc_id }}"
+    cidr: "{{ item.cidr }}"
+    az: "{{ item.az }}"
+    region: "{{ aws_region }}"
+    map_public: yes
+    tags:
+      Name: "{{ vpc_name }}-public-{{ item.az }}"
+      Project: openshift-dual-cluster
+      Type: public
+    state: present
+  loop: "{{ public_subnets }}"
+  register: public_subnets_result
+
+- name: Set public subnet IDs fact
+  set_fact:
+    public_subnet_ids: "{{ public_subnets_result.results | map(attribute='subnet.id') | list }}"
+
+- name: Create private subnets
+  amazon.aws.ec2_vpc_subnet:
+    vpc_id: "{{ vpc_id }}"
+    cidr: "{{ item.cidr }}"
+    az: "{{ item.az }}"
+    region: "{{ aws_region }}"
+    tags:
+      Name: "{{ vpc_name }}-private-{{ item.az }}"
+      Project: openshift-dual-cluster
+      Type: private
+    state: present
+  loop: "{{ private_subnets }}"
+  register: private_subnets_result
+
+- name: Set private subnet IDs fact
+  set_fact:
+    private_subnet_ids: "{{ private_subnets_result.results | map(attribute='subnet.id') | list }}"
+
+- name: Create NAT gateways
+  amazon.aws.ec2_vpc_nat_gateway:
+    subnet_id: "{{ item }}"
+    region: "{{ aws_region }}"
+    wait: yes
+    if_exist_do_not_create: yes
+    tags:
+      Name: "{{ vpc_name }}-nat-{{ loop_index }}"
+      Project: openshift-dual-cluster
+    state: present
+  loop: "{{ public_subnet_ids }}"
+  loop_control:
+    index_var: loop_index
+  register: nat_gateways
+
+- name: Create public route table
+  amazon.aws.ec2_vpc_route_table:
+    vpc_id: "{{ vpc_id }}"
+    region: "{{ aws_region }}"
+    tags:
+      Name: "{{ vpc_name }}-public-rt"
+      Project: openshift-dual-cluster
+    subnets: "{{ public_subnet_ids }}"
+    routes:
+      - dest: 0.0.0.0/0
+        gateway_id: "{{ igw.gateway_id }}"
+    state: present
+
+- name: Create private route tables
+  amazon.aws.ec2_vpc_route_table:
+    vpc_id: "{{ vpc_id }}"
+    region: "{{ aws_region }}"
+    tags:
+      Name: "{{ vpc_name }}-private-rt-{{ loop_index }}"
+      Project: openshift-dual-cluster
+    subnets:
+      - "{{ private_subnet_ids[loop_index] }}"
+    routes:
+      - dest: 0.0.0.0/0
+        gateway_id: "{{ nat_gateways.results[loop_index].nat_gateway_id }}"
+    state: present
+  loop: "{{ private_subnet_ids }}"
+  loop_control:
+    index_var: loop_index

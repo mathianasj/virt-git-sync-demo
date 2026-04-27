@@ -1,0 +1,9 @@
+---
+- name: Include package installation tasks
+  include_tasks: packages.yml
+
+- name: Include credentials configuration tasks
+  include_tasks: credentials.yml
+
+- name: Include workspace setup tasks
+  include_tasks: workspace.yml

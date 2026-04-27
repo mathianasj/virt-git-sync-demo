@@ -1,0 +1,24 @@
+---
+- name: Phase 7 - Bare Metal Machineset Creation
+  hosts: bastion
+  gather_facts: no
+  become: yes
+  tasks:
+    - name: Create bare metal machinesets for both clusters
+      include_role:
+        name: bare_metal
+      vars:
+        cluster_config: "{{ item }}"
+        kubeconfig_path: "{{ item.install_dir }}/auth/kubeconfig"
+      loop: "{{ clusters }}"
+      loop_control:
+        label: "{{ item.cluster_name }}"
+
+  post_tasks:
+    - name: Display machineset creation status
+      debug:
+        msg:
+          - "Bare metal machinesets created successfully"
+          - "Instance type: {{ bare_metal_instance_type }}"
+          - "Replicas per cluster: {{ bare_metal_replicas }}"
+          - "Total bare metal nodes: {{ bare_metal_replicas * 2 }}"

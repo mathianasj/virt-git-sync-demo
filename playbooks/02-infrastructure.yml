@@ -1,0 +1,23 @@
+---
+- name: Phase 2 - AWS Infrastructure Setup
+  hosts: localhost
+  gather_facts: no
+  roles:
+    - aws_infrastructure
+
+  post_tasks:
+    - name: Display infrastructure details
+      debug:
+        msg:
+          - "AWS infrastructure created successfully"
+          - "VPC ID: {{ vpc_id }}"
+          - "Bastion Public IP: {{ bastion_public_ip }}"
+          - "Bastion SSH: ssh -i ~/.ssh/{{ bastion_key_name }} {{ bastion_user }}@{{ bastion_public_ip }}"
+
+    - name: Wait for bastion to be reachable
+      wait_for:
+        host: "{{ bastion_public_ip }}"
+        port: 22
+        delay: 10
+        timeout: 300
+        state: started

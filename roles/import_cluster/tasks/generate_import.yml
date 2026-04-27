@@ -1,0 +1,60 @@
+---
+- name: Create ManagedCluster resource on hub
+  kubernetes.core.k8s:
+    kubeconfig: "{{ hub_kubeconfig }}"
+    state: present
+    definition:
+      apiVersion: cluster.open-cluster-management.io/v1
+      kind: ManagedCluster
+      metadata:
+        name: "{{ managed_cluster_name }}"
+        labels:
+          cloud: auto-detect
+          vendor: OpenShift
+      spec:
+        hubAcceptsClient: true
+
+- name: Create namespace for managed cluster on hub
+  kubernetes.core.k8s:
+    kubeconfig: "{{ hub_kubeconfig }}"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ managed_cluster_name }}"
+
+- name: Create KlusterletAddonConfig
+  kubernetes.core.k8s:
+    kubeconfig: "{{ hub_kubeconfig }}"
+    state: present
+    definition:
+      apiVersion: agent.open-cluster-management.io/v1
+      kind: KlusterletAddonConfig
+      metadata:
+        name: "{{ managed_cluster_name }}"
+        namespace: "{{ managed_cluster_name }}"
+      spec:
+        clusterName: "{{ managed_cluster_name }}"
+        clusterNamespace: "{{ managed_cluster_name }}"
+        clusterLabels:
+          cloud: auto-detect
+          vendor: OpenShift
+        applicationManager:
+          enabled: true
+        policyController:
+          enabled: true
+        searchCollector:
+          enabled: true
+        certPolicyController:
+          enabled: true
+
+- name: Get import secret from hub
+  shell: |
+    oc get secret {{ managed_cluster_name }}-import -n {{ managed_cluster_name }} -o jsonpath='{.data.crds\.yaml}' | base64 -d > /tmp/{{ managed_cluster_name }}-import-crds.yaml
+    oc get secret {{ managed_cluster_name }}-import -n {{ managed_cluster_name }} -o jsonpath='{.data.import\.yaml}' | base64 -d > /tmp/{{ managed_cluster_name }}-import.yaml
+  environment:
+    KUBECONFIG: "{{ hub_kubeconfig }}"
+  retries: 10
+  delay: 30
+  changed_when: false

@@ -1,0 +1,37 @@
+---
+- name: Create IAM policy for OpenShift installer
+  amazon.aws.iam_managed_policy:
+    policy_name: OpenShiftInstallerPolicy
+    policy_description: Policy for OpenShift installer
+    policy: "{{ lookup('file', 'openshift-installer-policy.json') }}"
+    state: present
+  register: installer_policy
+
+- name: Create IAM role for bastion
+  amazon.aws.iam_role:
+    name: OpenShiftBastionRole
+    assume_role_policy_document: |
+      {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Effect": "Allow",
+            "Principal": {
+              "Service": "ec2.amazonaws.com"
+            },
+            "Action": "sts:AssumeRole"
+          }
+        ]
+      }
+    managed_policies:
+      - "{{ installer_policy.policy.arn }}"
+    description: IAM role for OpenShift bastion host
+    state: present
+  register: bastion_role
+
+- name: Create instance profile for bastion
+  amazon.aws.iam_instance_profile:
+    name: OpenShiftBastionProfile
+    role: "{{ bastion_role.role_name }}"
+    state: present
+  register: bastion_profile

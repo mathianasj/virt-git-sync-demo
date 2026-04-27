@@ -1,0 +1,26 @@
+---
+- name: Phase 6 - Import Managed Cluster to ACM
+  hosts: bastion
+  gather_facts: no
+  become: yes
+  vars:
+    hub_cluster: "{{ clusters[0] }}"
+    managed_cluster: "{{ clusters[1] }}"
+
+  tasks:
+    - name: Import managed cluster
+      include_role:
+        name: import_cluster
+      vars:
+        hub_kubeconfig: "{{ hub_cluster.install_dir }}/auth/kubeconfig"
+        managed_kubeconfig: "{{ managed_cluster.install_dir }}/auth/kubeconfig"
+        managed_cluster_name: "{{ managed_cluster.cluster_name }}"
+
+  post_tasks:
+    - name: Display cluster import status
+      debug:
+        msg:
+          - "Managed cluster imported successfully"
+          - "Cluster name: {{ managed_cluster.cluster_name }}"
+          - "Status: Available in ACM hub"
+          - "View in ACM console: Infrastructure -> Clusters"

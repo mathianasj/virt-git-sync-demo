@@ -1,0 +1,36 @@
+---
+- name: Create MultiClusterHub resource
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: present
+    definition:
+      apiVersion: operator.open-cluster-management.io/v1
+      kind: MultiClusterHub
+      metadata:
+        name: multiclusterhub
+        namespace: "{{ acm_namespace }}"
+      spec: {}
+
+- name: Wait for MultiClusterHub to be ready
+  shell: |
+    oc get multiclusterhub multiclusterhub -n {{ acm_namespace }} -o jsonpath='{.status.phase}'
+  environment: "{{ kubeconfig_env }}"
+  register: mch_status
+  until: mch_status.stdout == "Running"
+  retries: "{{ operator_timeout_minutes | int }}"
+  delay: 60
+  changed_when: false
+
+- name: Verify ACM components are running
+  shell: |
+    oc get pods -n {{ acm_namespace }} --field-selector=status.phase!=Running,status.phase!=Succeeded --no-headers | wc -l
+  environment: "{{ kubeconfig_env }}"
+  register: non_running_pods
+  until: non_running_pods.stdout | int == 0
+  retries: 10
+  delay: 30
+  changed_when: false
+
+- name: Display MultiClusterHub status
+  debug:
+    msg: "MultiClusterHub is running and ready"

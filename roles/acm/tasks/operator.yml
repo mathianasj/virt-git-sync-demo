@@ -1,0 +1,55 @@
+---
+- name: Create ACM namespace
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ acm_namespace }}"
+
+- name: Create OperatorGroup for ACM
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: present
+    definition:
+      apiVersion: operators.coreos.com/v1
+      kind: OperatorGroup
+      metadata:
+        name: "{{ acm_operator_name }}"
+        namespace: "{{ acm_namespace }}"
+      spec:
+        targetNamespaces:
+        - "{{ acm_namespace }}"
+
+- name: Create Subscription for ACM operator
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: present
+    definition:
+      apiVersion: operators.coreos.com/v1alpha1
+      kind: Subscription
+      metadata:
+        name: "{{ acm_operator_name }}"
+        namespace: "{{ acm_namespace }}"
+      spec:
+        channel: "{{ acm_operator_channel }}"
+        installPlanApproval: Automatic
+        name: "{{ acm_operator_name }}"
+        source: "{{ acm_operator_source }}"
+        sourceNamespace: openshift-marketplace
+
+- name: Wait for ACM operator to be ready
+  shell: |
+    oc get csv -n {{ acm_namespace }} | grep advanced-cluster-management | grep -q Succeeded
+  environment: "{{ kubeconfig_env }}"
+  register: acm_csv
+  until: acm_csv.rc == 0
+  retries: "{{ operator_timeout_minutes | int }}"
+  delay: 60
+  changed_when: false
+
+- name: Display ACM operator status
+  debug:
+    msg: "ACM operator installed successfully"

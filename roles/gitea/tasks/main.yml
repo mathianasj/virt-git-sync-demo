@@ -1,0 +1,99 @@
+---
+- name: Set kubeconfig environment
+  set_fact:
+    kubeconfig_env:
+      KUBECONFIG: "{{ kubeconfig_path }}"
+
+- name: Create Gitea namespace
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ gitea_namespace }}"
+
+- name: Add Gitea Helm repository
+  shell: |
+    helm repo add gitea-charts {{ gitea_chart_repo }}
+    helm repo update
+  environment: "{{ kubeconfig_env }}"
+  changed_when: true
+
+- name: Create Gitea values file
+  template:
+    src: values.yaml.j2
+    dest: /tmp/gitea-values.yaml
+    mode: '0644'
+
+- name: Deploy Gitea via Helm
+  shell: |
+    helm upgrade --install gitea gitea-charts/{{ gitea_chart_name }} \
+      --namespace {{ gitea_namespace }} \
+      --version {{ gitea_chart_version }} \
+      --values /tmp/gitea-values.yaml \
+      --wait \
+      --timeout 10m
+  environment: "{{ kubeconfig_env }}"
+  register: helm_deploy
+  changed_when: "'deployed' in helm_deploy.stdout or 'upgraded' in helm_deploy.stdout"
+
+- name: Wait for Gitea deployment to be ready
+  shell: |
+    oc get deployment gitea -n {{ gitea_namespace }} -o jsonpath='{.status.availableReplicas}'
+  environment: "{{ kubeconfig_env }}"
+  register: gitea_replicas
+  until: gitea_replicas.stdout | int > 0
+  retries: 20
+  delay: 30
+  changed_when: false
+
+- name: Get Gitea route
+  shell: |
+    oc get route gitea -n {{ gitea_namespace }} -o jsonpath='{.spec.host}' 2>/dev/null || echo "route-not-found"
+  environment: "{{ kubeconfig_env }}"
+  register: gitea_route
+  changed_when: false
+
+- name: Create OpenShift route for Gitea if not exists
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: present
+    definition:
+      apiVersion: route.openshift.io/v1
+      kind: Route
+      metadata:
+        name: gitea
+        namespace: "{{ gitea_namespace }}"
+      spec:
+        to:
+          kind: Service
+          name: gitea-http
+        port:
+          targetPort: http
+        tls:
+          termination: edge
+          insecureEdgeTerminationPolicy: Redirect
+  when: gitea_route.stdout == "route-not-found"
+
+- name: Get final Gitea route
+  shell: |
+    oc get route gitea -n {{ gitea_namespace }} -o jsonpath='{.spec.host}'
+  environment: "{{ kubeconfig_env }}"
+  register: final_gitea_route
+  changed_when: false
+
+- name: Display Gitea deployment information
+  debug:
+    msg:
+      - "Gitea deployed successfully"
+      - "URL: https://{{ final_gitea_route.stdout }}"
+      - "Admin user: {{ gitea_admin_user }}"
+      - "Admin password: {{ gitea_admin_password }}"
+      - "Note: Change the admin password after first login"
+
+- name: Clean up values file
+  file:
+    path: /tmp/gitea-values.yaml
+    state: absent

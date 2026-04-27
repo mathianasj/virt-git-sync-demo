@@ -1,0 +1,29 @@
+---
+- name: Include VPC tasks
+  include_tasks: vpc.yml
+
+- name: Include security groups tasks
+  include_tasks: security_groups.yml
+
+- name: Include IAM tasks
+  include_tasks: iam.yml
+
+- name: Include bastion tasks
+  include_tasks: bastion.yml
+
+- name: Save infrastructure state
+  copy:
+    content: |
+      {
+        "vpc_id": "{{ vpc_id }}",
+        "public_subnet_ids": {{ public_subnet_ids | to_json }},
+        "private_subnet_ids": {{ private_subnet_ids | to_json }},
+        "bastion_instance_id": "{{ bastion_instance.instance_id }}",
+        "bastion_public_ip": "{{ bastion_public_ip }}",
+        "security_group_ids": {
+          "bastion": "{{ bastion_sg_id }}",
+          "cluster": "{{ cluster_sg_id }}"
+        }
+      }
+    dest: /tmp/aws-infrastructure-state.json
+    mode: '0644'

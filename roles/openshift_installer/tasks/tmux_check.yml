@@ -1,0 +1,48 @@
+---
+- name: Check if cluster is already installed
+  stat:
+    path: "{{ install_dir }}/auth/kubeconfig"
+  register: existing_cluster
+
+- name: Skip installation if cluster already exists
+  set_fact:
+    skip_install: true
+  when: existing_cluster.stat.exists
+
+- name: Display cluster already installed message
+  debug:
+    msg: "Cluster {{ cluster_name }} is already installed. Skipping installation."
+  when: existing_cluster.stat.exists
+
+- name: Check if tmux session exists
+  shell: tmux has-session -t {{ tmux_session }} 2>/dev/null
+  register: tmux_exists
+  failed_when: false
+  changed_when: false
+  when: not (existing_cluster.stat.exists | default(false))
+
+- name: Set tmux session status
+  set_fact:
+    tmux_session_exists: "{{ tmux_exists.rc == 0 }}"
+  when: not (existing_cluster.stat.exists | default(false))
+
+- name: Display tmux session status
+  debug:
+    msg: "Tmux session {{ tmux_session }} {{ 'already exists - will reattach' if tmux_session_exists else 'does not exist - will create new' }}"
+  when: not (existing_cluster.stat.exists | default(false))
+
+- name: Start new OpenShift installation in tmux
+  shell: |
+    cd {{ install_dir }}
+    tmux new-session -d -s {{ tmux_session }} \
+      "openshift-install create cluster --dir={{ install_dir }} --log-level=debug 2>&1 | tee {{ install_dir }}/install.log"
+  when:
+    - not (existing_cluster.stat.exists | default(false))
+    - not (tmux_session_exists | default(false))
+
+- name: Log installation start
+  shell: |
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - Started OpenShift installation for {{ cluster_name }} in tmux session {{ tmux_session }}" >> {{ log_file }}
+  when:
+    - not (existing_cluster.stat.exists | default(false))
+    - not (tmux_session_exists | default(false))

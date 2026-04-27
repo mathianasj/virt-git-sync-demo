@@ -1,0 +1,23 @@
+---
+- name: Phase 5 - Advanced Cluster Management Setup
+  hosts: bastion
+  gather_facts: no
+  become: yes
+  vars:
+    hub_cluster: "{{ clusters[0] }}"
+
+  tasks:
+    - name: Install ACM on hub cluster
+      include_role:
+        name: acm
+      vars:
+        kubeconfig_path: "{{ hub_cluster.install_dir }}/auth/kubeconfig"
+
+  post_tasks:
+    - name: Display ACM installation status
+      debug:
+        msg:
+          - "ACM installed successfully on hub cluster"
+          - "ACM namespace: {{ acm_namespace }}"
+          - "MultiClusterHub: deployed"
+          - "Console: https://multicloud-console.apps.{{ hub_cluster.cluster_name }}.{{ hub_cluster.base_domain }}"

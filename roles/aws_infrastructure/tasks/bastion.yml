@@ -1,0 +1,48 @@
+---
+- name: Create SSH key pair for bastion
+  amazon.aws.ec2_key:
+    name: "{{ bastion_key_name }}"
+    region: "{{ aws_region }}"
+    state: present
+  register: bastion_key
+
+- name: Save private key locally
+  copy:
+    content: "{{ bastion_key.key.private_key }}"
+    dest: "~/.ssh/{{ bastion_key_name }}"
+    mode: '0600'
+  when: bastion_key.key.private_key is defined
+
+- name: Launch bastion EC2 instance
+  amazon.aws.ec2_instance:
+    name: "{{ vpc_name }}-bastion"
+    region: "{{ aws_region }}"
+    instance_type: "{{ bastion_instance_type }}"
+    image_id: "{{ bastion_ami }}"
+    key_name: "{{ bastion_key_name }}"
+    vpc_subnet_id: "{{ public_subnet_ids[0] }}"
+    security_groups:
+      - "{{ bastion_sg_id }}"
+    network:
+      assign_public_ip: yes
+    iam_instance_profile: "{{ bastion_profile.iam_instance_profile.instance_profile_name }}"
+    tags:
+      Name: "{{ vpc_name }}-bastion"
+      Project: openshift-dual-cluster
+      Role: bastion
+    wait: yes
+    state: running
+  register: bastion_instance
+
+- name: Set bastion public IP fact
+  set_fact:
+    bastion_public_ip: "{{ bastion_instance.instances[0].public_ip_address }}"
+
+- name: Add bastion to inventory
+  add_host:
+    name: bastion_host
+    groups: bastion
+    ansible_host: "{{ bastion_public_ip }}"
+    ansible_user: "{{ bastion_user }}"
+    ansible_ssh_private_key_file: "~/.ssh/{{ bastion_key_name }}"
+    ansible_ssh_common_args: '-o StrictHostKeyChecking=no'

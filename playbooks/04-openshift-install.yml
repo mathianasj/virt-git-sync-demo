@@ -1,0 +1,27 @@
+---
+- name: Phase 4 - OpenShift Cluster Installation
+  hosts: bastion
+  gather_facts: no
+  become: yes
+  serial: 1
+  vars:
+    clusters_to_install: "{{ clusters }}"
+
+  tasks:
+    - name: Install clusters using tmux sessions
+      include_role:
+        name: openshift_installer
+      vars:
+        cluster_config: "{{ item }}"
+      loop: "{{ clusters_to_install }}"
+      loop_control:
+        label: "{{ item.cluster_name }}"
+
+  post_tasks:
+    - name: Display cluster installation status
+      debug:
+        msg:
+          - "OpenShift clusters installed successfully"
+          - "Hub cluster: {{ clusters[0].cluster_name }}"
+          - "Managed cluster: {{ clusters[1].cluster_name }}"
+          - "Kubeconfig files available on bastion"

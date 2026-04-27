@@ -1,0 +1,71 @@
+---
+- name: Dual OpenShift Cluster Deployment with ACM - Initialization
+  hosts: localhost
+  gather_facts: yes
+  vars_prompt:
+    - name: openshift_pull_secret
+      prompt: "Enter your OpenShift pull secret (paste JSON)"
+      private: yes
+
+  tasks:
+    - name: Validate pull secret format
+      assert:
+        that:
+          - openshift_pull_secret | from_json
+        fail_msg: "Invalid pull secret JSON format"
+
+    - name: Save pull secret to temporary file
+      copy:
+        content: "{{ openshift_pull_secret }}"
+        dest: /tmp/pull-secret.json
+        mode: '0600'
+      no_log: true
+
+    - name: Display deployment overview
+      debug:
+        msg:
+          - "=========================================="
+          - "OpenShift Dual Cluster Deployment"
+          - "=========================================="
+          - "Region: {{ aws_region }}"
+          - "Hub Cluster: {{ clusters[0].cluster_name }}"
+          - "Managed Cluster: {{ clusters[1].cluster_name }}"
+          - "OpenShift Version: {{ openshift_version }}"
+          - "Bare Metal Instances: {{ bare_metal_instance_type }} ({{ bare_metal_replicas }} per cluster)"
+          - "Estimated Total Time: 90-120 minutes"
+          - "=========================================="
+
+- import_playbook: 01-prerequisites.yml
+- import_playbook: 02-infrastructure.yml
+- import_playbook: 03-bastion-setup.yml
+- import_playbook: 04-openshift-install.yml
+- import_playbook: 05-acm-setup.yml
+- import_playbook: 06-import-cluster.yml
+- import_playbook: 07-bare-metal-machinesets.yml
+- import_playbook: 08-virtualization-policy.yml
+- import_playbook: 09-gitea-deployment.yml
+
+- name: Deployment Summary
+  hosts: localhost
+  gather_facts: no
+  tasks:
+    - name: Display deployment completion summary
+      debug:
+        msg:
+          - "=========================================="
+          - "Deployment Complete!"
+          - "=========================================="
+          - "Hub Cluster Console: https://console-openshift-console.apps.{{ clusters[0].cluster_name }}.{{ clusters[0].base_domain }}"
+          - "Managed Cluster Console: https://console-openshift-console.apps.{{ clusters[1].cluster_name }}.{{ clusters[1].base_domain }}"
+          - "ACM Console: https://multicloud-console.apps.{{ clusters[0].cluster_name }}.{{ clusters[0].base_domain }}"
+          - "Gitea URL: https://gitea-{{ gitea_namespace }}.apps.{{ clusters[0].cluster_name }}.{{ clusters[0].base_domain }}"
+          - ""
+          - "Kubeconfig files are located on bastion:"
+          - "  Hub: {{ clusters[0].install_dir }}/auth/kubeconfig"
+          - "  Managed: {{ clusters[1].install_dir }}/auth/kubeconfig"
+          - ""
+          - "Next steps:"
+          - "  1. SSH to bastion: ssh -i ~/.ssh/{{ bastion_key_name }} {{ bastion_user }}@{{ bastion_public_ip }}"
+          - "  2. Export KUBECONFIG and verify clusters"
+          - "  3. Access ACM console to manage both clusters"
+          - "=========================================="

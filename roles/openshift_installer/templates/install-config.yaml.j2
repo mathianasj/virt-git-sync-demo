@@ -1,0 +1,44 @@
+apiVersion: v1
+baseDomain: {{ cluster_config.base_domain }}
+metadata:
+  name: {{ cluster_config.cluster_name }}
+compute:
+- architecture: amd64
+  hyperthreading: Enabled
+  name: worker
+  platform:
+    aws:
+      type: {{ cluster_config.compute.instance_type }}
+      zones:
+      - {{ aws_region }}a
+      - {{ aws_region }}b
+      - {{ aws_region }}c
+  replicas: {{ cluster_config.compute.replicas }}
+controlPlane:
+  architecture: amd64
+  hyperthreading: Enabled
+  name: master
+  platform:
+    aws:
+      type: {{ cluster_config.control_plane.instance_type }}
+      zones:
+      - {{ aws_region }}a
+      - {{ aws_region }}b
+      - {{ aws_region }}c
+  replicas: {{ cluster_config.control_plane.replicas }}
+networking:
+  clusterNetwork:
+  - cidr: 10.128.0.0/14
+    hostPrefix: 23
+  machineNetwork:
+  - cidr: {{ cluster_config.machine_network }}
+  networkType: OVNKubernetes
+  serviceNetwork:
+  - 172.30.0.0/16
+platform:
+  aws:
+    region: {{ aws_region }}
+publish: External
+pullSecret: '{{ lookup("file", "/root/pull-secret.json") | string }}'
+sshKey: |
+  {{ lookup("file", "/root/.ssh/openshift-key.pub") }}

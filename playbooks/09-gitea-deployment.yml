@@ -1,0 +1,24 @@
+---
+- name: Phase 9 - Gitea Deployment
+  hosts: bastion
+  gather_facts: no
+  become: yes
+  vars:
+    hub_cluster: "{{ clusters[0] }}"
+
+  tasks:
+    - name: Deploy Gitea via Helm
+      include_role:
+        name: gitea
+      vars:
+        kubeconfig_path: "{{ hub_cluster.install_dir }}/auth/kubeconfig"
+
+  post_tasks:
+    - name: Display Gitea deployment status
+      debug:
+        msg:
+          - "Gitea deployed successfully on hub cluster"
+          - "Namespace: {{ gitea_namespace }}"
+          - "URL: https://gitea-{{ gitea_namespace }}.apps.{{ hub_cluster.cluster_name }}.{{ hub_cluster.base_domain }}"
+          - "Admin user: {{ gitea_admin_user }}"
+          - "Note: Change the default password on first login"

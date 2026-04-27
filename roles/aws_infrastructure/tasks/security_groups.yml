@@ -1,0 +1,65 @@
+---
+- name: Create bastion security group
+  amazon.aws.ec2_security_group:
+    name: "{{ vpc_name }}-bastion-sg"
+    description: Security group for bastion host
+    vpc_id: "{{ vpc_id }}"
+    region: "{{ aws_region }}"
+    tags:
+      Name: "{{ vpc_name }}-bastion-sg"
+      Project: openshift-dual-cluster
+    rules:
+      - proto: tcp
+        ports: 22
+        cidr_ip: 0.0.0.0/0
+        rule_desc: SSH access
+    rules_egress:
+      - proto: -1
+        cidr_ip: 0.0.0.0/0
+        rule_desc: Allow all outbound
+    state: present
+  register: bastion_sg
+
+- name: Set bastion security group ID fact
+  set_fact:
+    bastion_sg_id: "{{ bastion_sg.group_id }}"
+
+- name: Create OpenShift cluster security group
+  amazon.aws.ec2_security_group:
+    name: "{{ vpc_name }}-cluster-sg"
+    description: Security group for OpenShift clusters
+    vpc_id: "{{ vpc_id }}"
+    region: "{{ aws_region }}"
+    tags:
+      Name: "{{ vpc_name }}-cluster-sg"
+      Project: openshift-dual-cluster
+    rules:
+      - proto: tcp
+        ports: 6443
+        cidr_ip: "{{ vpc_cidr }}"
+        rule_desc: Kubernetes API
+      - proto: tcp
+        ports: 22623
+        cidr_ip: "{{ vpc_cidr }}"
+        rule_desc: Machine config server
+      - proto: tcp
+        ports: 443
+        cidr_ip: 0.0.0.0/0
+        rule_desc: HTTPS ingress
+      - proto: tcp
+        ports: 80
+        cidr_ip: 0.0.0.0/0
+        rule_desc: HTTP ingress
+      - proto: -1
+        cidr_ip: "{{ vpc_cidr }}"
+        rule_desc: Allow all internal VPC traffic
+    rules_egress:
+      - proto: -1
+        cidr_ip: 0.0.0.0/0
+        rule_desc: Allow all outbound
+    state: present
+  register: cluster_sg
+
+- name: Set cluster security group ID fact
+  set_fact:
+    cluster_sg_id: "{{ cluster_sg.group_id }}"

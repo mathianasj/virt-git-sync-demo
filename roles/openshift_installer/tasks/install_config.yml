@@ -1,0 +1,27 @@
+---
+- name: Check if install-config.yaml already exists
+  stat:
+    path: "{{ install_dir }}/install-config.yaml"
+  register: install_config_stat
+
+- name: Check if cluster already exists
+  stat:
+    path: "{{ install_dir }}/auth/kubeconfig"
+  register: kubeconfig_stat
+
+- name: Create install-config.yaml from template
+  template:
+    src: install-config.yaml.j2
+    dest: "{{ install_dir }}/install-config.yaml"
+    mode: '0644'
+  when:
+    - not install_config_stat.stat.exists
+    - not kubeconfig_stat.stat.exists
+
+- name: Backup install-config.yaml
+  copy:
+    src: "{{ install_dir }}/install-config.yaml"
+    dest: "{{ install_dir }}/install-config.yaml.backup"
+    remote_src: yes
+    mode: '0644'
+  when: install_config_stat.stat.exists or (not kubeconfig_stat.stat.exists)

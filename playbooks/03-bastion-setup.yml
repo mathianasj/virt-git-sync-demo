@@ -1,0 +1,19 @@
+---
+- name: Phase 3 - Bastion Host Configuration
+  hosts: bastion
+  gather_facts: yes
+  become: yes
+  roles:
+    - bastion
+
+  post_tasks:
+    - name: Display bastion configuration status
+      debug:
+        msg:
+          - "Bastion host configured successfully"
+          - "OpenShift installer: installed"
+          - "OC client: installed"
+          - "AWS CLI: configured"
+          - "Helm: installed"
+          - "Working directories: created"
+          - "Pull secret: uploaded"

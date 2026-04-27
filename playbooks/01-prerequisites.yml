@@ -1,0 +1,42 @@
+---
+- name: Phase 1 - Prerequisites Check
+  hosts: localhost
+  gather_facts: yes
+  tasks:
+    - name: Check for AWS credentials
+      command: aws sts get-caller-identity
+      register: aws_identity
+      changed_when: false
+
+    - name: Display AWS identity
+      debug:
+        msg: "Using AWS Account: {{ (aws_identity.stdout | from_json).Account }}"
+
+    - name: Verify Ansible version
+      assert:
+        that:
+          - ansible_version.full is version('2.9', '>=')
+        fail_msg: "Ansible 2.9 or higher is required"
+
+    - name: Check for required Python modules
+      community.general.python_requirements_info:
+        dependencies:
+          - boto3
+          - botocore
+      register: python_deps
+      failed_when: python_deps.not_found | length > 0
+
+    - name: Verify pull secret file exists
+      stat:
+        path: /tmp/pull-secret.json
+      register: pull_secret_stat
+      failed_when: not pull_secret_stat.stat.exists
+
+    - name: Display prerequisites check results
+      debug:
+        msg:
+          - "Prerequisites check passed"
+          - "AWS credentials: OK"
+          - "Ansible version: {{ ansible_version.full }}"
+          - "Python modules: OK"
+          - "Pull secret: OK"

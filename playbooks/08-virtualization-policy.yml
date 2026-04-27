@@ -1,0 +1,24 @@
+---
+- name: Phase 8 - OpenShift Virtualization Deployment via ACM
+  hosts: bastion
+  gather_facts: no
+  become: yes
+  vars:
+    hub_cluster: "{{ clusters[0] }}"
+
+  tasks:
+    - name: Deploy OpenShift Virtualization policy
+      include_role:
+        name: cnv_policy
+      vars:
+        hub_kubeconfig: "{{ hub_cluster.install_dir }}/auth/kubeconfig"
+
+  post_tasks:
+    - name: Display OpenShift Virtualization deployment status
+      debug:
+        msg:
+          - "OpenShift Virtualization deployed via ACM policy"
+          - "Target clusters: Both hub and managed"
+          - "Operator namespace: {{ cnv_namespace }}"
+          - "HyperConverged CR: Deployed"
+          - "Verify: oc get hyperconverged -n {{ cnv_namespace }}"

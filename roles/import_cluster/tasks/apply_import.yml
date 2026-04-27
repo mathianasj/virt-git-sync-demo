@@ -1,0 +1,33 @@
+---
+- name: Apply import CRDs to managed cluster
+  shell: |
+    oc apply -f /tmp/{{ managed_cluster_name }}-import-crds.yaml
+  environment:
+    KUBECONFIG: "{{ managed_kubeconfig }}"
+  changed_when: true
+
+- name: Apply import manifests to managed cluster
+  shell: |
+    oc apply -f /tmp/{{ managed_cluster_name }}-import.yaml
+  environment:
+    KUBECONFIG: "{{ managed_kubeconfig }}"
+  changed_when: true
+
+- name: Wait for klusterlet to be deployed
+  shell: |
+    oc get deployment klusterlet -n open-cluster-management-agent -o jsonpath='{.status.availableReplicas}'
+  environment:
+    KUBECONFIG: "{{ managed_kubeconfig }}"
+  register: klusterlet_status
+  until: klusterlet_status.stdout | int > 0
+  retries: 15
+  delay: 30
+  changed_when: false
+
+- name: Clean up import files
+  file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /tmp/{{ managed_cluster_name }}-import-crds.yaml
+    - /tmp/{{ managed_cluster_name }}-import.yaml

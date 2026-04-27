@@ -1,0 +1,69 @@
+---
+- name: Update system packages
+  yum:
+    name: '*'
+    state: latest
+    update_cache: yes
+
+- name: Install required packages
+  yum:
+    name:
+      - tmux
+      - wget
+      - tar
+      - gzip
+      - jq
+      - git
+      - python3-pip
+      - unzip
+    state: present
+
+- name: Install AWS CLI
+  shell: |
+    curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "/tmp/awscliv2.zip"
+    unzip -o /tmp/awscliv2.zip -d /tmp
+    /tmp/aws/install --update
+  args:
+    creates: /usr/local/bin/aws
+
+- name: Download OpenShift installer
+  get_url:
+    url: "{{ openshift_install_url }}"
+    dest: /tmp/openshift-install.tar.gz
+    mode: '0644'
+
+- name: Extract OpenShift installer
+  unarchive:
+    src: /tmp/openshift-install.tar.gz
+    dest: /usr/local/bin/
+    remote_src: yes
+    creates: /usr/local/bin/openshift-install
+
+- name: Download OpenShift client
+  get_url:
+    url: "{{ openshift_client_url }}"
+    dest: /tmp/openshift-client.tar.gz
+    mode: '0644'
+
+- name: Extract OpenShift client
+  unarchive:
+    src: /tmp/openshift-client.tar.gz
+    dest: /usr/local/bin/
+    remote_src: yes
+    creates: /usr/local/bin/oc
+
+- name: Install Helm
+  shell: |
+    curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+  args:
+    creates: /usr/local/bin/helm
+
+- name: Verify installations
+  command: "{{ item }} version"
+  loop:
+    - aws
+    - openshift-install
+    - oc
+    - helm
+  register: version_check
+  changed_when: false

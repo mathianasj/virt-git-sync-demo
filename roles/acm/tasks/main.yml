@@ -1,0 +1,22 @@
+---
+- name: Set kubeconfig environment
+  set_fact:
+    kubeconfig_env:
+      KUBECONFIG: "{{ kubeconfig_path }}"
+
+- name: Include operator installation tasks
+  include_tasks: operator.yml
+
+- name: Include MultiClusterHub installation tasks
+  include_tasks: multiclusterhub.yml
+
+- name: Get ACM route
+  shell: |
+    oc get route multicloud-console -n {{ acm_namespace }} -o jsonpath='{.spec.host}'
+  environment: "{{ kubeconfig_env }}"
+  register: acm_route
+  changed_when: false
+
+- name: Display ACM console URL
+  debug:
+    msg: "ACM Console URL: https://{{ acm_route.stdout }}"
