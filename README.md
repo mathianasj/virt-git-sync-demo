@@ -14,6 +14,7 @@ This project automates the complete deployment of:
 
 ### Key Features
 
+- **Automatic Route53 Discovery**: Detects and uses existing Route53 hosted zones
 - **Resilient Installation**: Uses tmux sessions on bastion to survive connection loss
 - **Idempotent**: Can be re-run safely without duplicating resources
 - **Modular Design**: 9 phase playbooks and 8 reusable roles
@@ -99,6 +100,7 @@ See [USAGE.md](USAGE.md) for detailed instructions.
 - Ansible 2.9+
 - Python 3.6+ with boto3, botocore, kubernetes
 - AWS credentials with appropriate permissions
+- **Route53 public hosted zone** (playbook auto-discovers from your AWS account)
 - OpenShift pull secret from Red Hat
 
 ## Configuration

@@ -36,12 +36,12 @@ This guide explains how to use the Ansible playbooks to deploy two OpenShift 4.2
 
 Before running, review and customize these files:
 
-1. **group_vars/all.yml** - Adjust cluster names, domains, instance types, etc.
-   - Update `base_domain` for both clusters
+1. **group_vars/all.yml** - Adjust cluster names, instance types, etc.
    - Adjust instance types if needed
    - Modify network CIDRs if conflicts exist
+   - Update bastion_ami if not using us-east-1
 
-2. **bastion_ami** - Ensure the RHEL 9 AMI ID is correct for your region
+**Note:** The playbook will automatically discover and use your Route53 hosted zones. You don't need to configure the domain manually - it will be detected from AWS Route53.
 
 ## Running the Deployment
 

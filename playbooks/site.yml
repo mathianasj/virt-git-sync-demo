@@ -48,6 +48,18 @@
 - name: Deployment Summary
   hosts: localhost
   gather_facts: no
+  vars_files:
+    - /tmp/selected-domain.yml
+  pre_tasks:
+    - name: Update clusters configuration with selected domain
+      set_fact:
+        clusters: |
+          {% set updated_clusters = [] %}
+          {% for cluster in clusters %}
+          {% set _ = cluster.update({'base_domain': selected_base_domain}) %}
+          {% set _ = updated_clusters.append(cluster) %}
+          {% endfor %}
+          {{ updated_clusters }}
   tasks:
     - name: Display deployment completion summary
       debug:
@@ -55,10 +67,10 @@
           - "=========================================="
           - "Deployment Complete!"
           - "=========================================="
-          - "Hub Cluster Console: https://console-openshift-console.apps.{{ clusters[0].cluster_name }}.{{ clusters[0].base_domain }}"
-          - "Managed Cluster Console: https://console-openshift-console.apps.{{ clusters[1].cluster_name }}.{{ clusters[1].base_domain }}"
-          - "ACM Console: https://multicloud-console.apps.{{ clusters[0].cluster_name }}.{{ clusters[0].base_domain }}"
-          - "Gitea URL: https://gitea-{{ gitea_namespace }}.apps.{{ clusters[0].cluster_name }}.{{ clusters[0].base_domain }}"
+          - "Hub Cluster Console: https://console-openshift-console.apps.{{ clusters[0].cluster_name }}.{{ selected_base_domain }}"
+          - "Managed Cluster Console: https://console-openshift-console.apps.{{ clusters[1].cluster_name }}.{{ selected_base_domain }}"
+          - "ACM Console: https://multicloud-console.apps.{{ clusters[0].cluster_name }}.{{ selected_base_domain }}"
+          - "Gitea URL: https://gitea-{{ gitea_namespace }}.apps.{{ clusters[0].cluster_name }}.{{ selected_base_domain }}"
           - ""
           - "Kubeconfig files are located on bastion:"
           - "  Hub: {{ clusters[0].install_dir }}/auth/kubeconfig"

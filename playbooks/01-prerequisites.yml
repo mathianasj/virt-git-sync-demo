@@ -32,6 +32,67 @@
       register: pull_secret_stat
       failed_when: not pull_secret_stat.stat.exists
 
+    - name: Query Route53 hosted zones
+      command: aws route53 list-hosted-zones --query 'HostedZones[?Config.PrivateZone==`false`].[Name,Id]' --output json
+      register: route53_zones_raw
+      changed_when: false
+
+    - name: Parse Route53 zones
+      set_fact:
+        route53_zones: "{{ route53_zones_raw.stdout | from_json }}"
+
+    - name: Fail if no public hosted zones found
+      fail:
+        msg: |
+          No public Route53 hosted zones found in this AWS account.
+          Please create a Route53 hosted zone before running this playbook.
+          Example: aws route53 create-hosted-zone --name yourdomain.com --caller-reference $(date +%s)
+      when: route53_zones | length == 0
+
+    - name: Auto-select domain if only one zone exists
+      set_fact:
+        selected_base_domain: "{{ route53_zones[0][0] | regex_replace('\\.$', '') }}"
+      when: route53_zones | length == 1
+
+    - name: Display auto-selected domain
+      debug:
+        msg: "Auto-selected Route53 domain: {{ selected_base_domain }}"
+      when: route53_zones | length == 1
+
+    - name: Prompt for domain selection if multiple zones exist
+      pause:
+        prompt: |
+          Multiple Route53 hosted zones found. Please select one:
+          {% for zone in route53_zones %}
+          {{ loop.index }}. {{ zone[0] }}
+          {% endfor %}
+          Enter the number of your choice
+      register: domain_choice
+      when: route53_zones | length > 1
+
+    - name: Set selected domain from user choice
+      set_fact:
+        selected_base_domain: "{{ route53_zones[domain_choice.user_input | int - 1][0] | regex_replace('\\.$', '') }}"
+      when: route53_zones | length > 1
+
+    - name: Update clusters configuration with selected domain
+      set_fact:
+        clusters: |
+          {% set updated_clusters = [] %}
+          {% for cluster in clusters %}
+          {% set _ = cluster.update({'base_domain': selected_base_domain}) %}
+          {% set _ = updated_clusters.append(cluster) %}
+          {% endfor %}
+          {{ updated_clusters }}
+
+    - name: Save domain selection to file for later playbooks
+      copy:
+        content: |
+          ---
+          selected_base_domain: "{{ selected_base_domain }}"
+        dest: /tmp/selected-domain.yml
+        mode: '0644'
+
     - name: Display prerequisites check results
       debug:
         msg:
@@ -40,3 +101,4 @@
           - "Ansible version: {{ ansible_version.full }}"
           - "Python modules: OK"
           - "Pull secret: OK"
+          - "Route53 domain: {{ selected_base_domain }}"

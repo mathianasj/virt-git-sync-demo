@@ -4,6 +4,18 @@
   gather_facts: no
   become: yes
   serial: 1
+  vars_files:
+    - /tmp/selected-domain.yml
+  pre_tasks:
+    - name: Update clusters configuration with selected domain
+      set_fact:
+        clusters: |
+          {% set updated_clusters = [] %}
+          {% for cluster in clusters %}
+          {% set _ = cluster.update({'base_domain': selected_base_domain}) %}
+          {% set _ = updated_clusters.append(cluster) %}
+          {% endfor %}
+          {{ updated_clusters }}
   vars:
     clusters_to_install: "{{ clusters }}"
 
