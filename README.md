@@ -111,7 +111,7 @@ See [USAGE.md](USAGE.md) for detailed instructions.
 
 **Note:** Run `./setup.sh` to automatically create a Python virtual environment and install all required dependencies (Ansible, boto3, kubernetes, etc.)
 
-**Important:** Two OpenShift clusters in one region require increased AWS quotas. The playbook checks quotas automatically, but you should request increases before starting. See [AWS_QUOTAS.md](AWS_QUOTAS.md) for details.
+**Important:** Two OpenShift clusters in one region require increased AWS quotas. The playbook **automatically checks quotas and can request increases for you**, waiting for approval before proceeding. See [AWS_QUOTAS.md](AWS_QUOTAS.md) for details.
 
 ## Configuration
 

@@ -2,6 +2,8 @@
 
 This deployment creates two OpenShift clusters in the same AWS region, which requires increased AWS quotas beyond the defaults.
 
+**NEW**: The playbook now **automatically requests quota increases** and can wait for approval! See "Automatic Quota Increase" section below.
+
 ## Required Quotas
 
 ### Elastic IPs (Most Critical)
@@ -36,6 +38,61 @@ Check your limits for:
 - `m5.xlarge`: Need at least 6
 - `m5.2xlarge`: Need at least 6
 - `c5.metal`: Need at least 4
+
+## Automatic Quota Increase (Recommended)
+
+**The playbook handles this for you!**
+
+When you run the playbook, it automatically checks your quotas. If insufficient, it will prompt:
+
+```
+==========================================
+Elastic IP Quota Insufficient
+==========================================
+Available: 2 EIPs
+Required: ~8 EIPs
+
+Options:
+  1. Request quota increase and wait (recommended)
+  2. Request increase but continue (risky)
+  3. Continue anyway (will likely fail)
+  4. Abort deployment
+
+Enter your choice (1-4):
+```
+
+### Option 1: Request and Wait (Recommended)
+
+The playbook will:
+1. ✅ Submit quota increase request to AWS
+2. ✅ Display request ID and status
+3. ✅ Poll every 60 seconds for approval
+4. ✅ Continue automatically when approved
+5. ✅ Refresh quotas before proceeding
+
+**Timeline**: Usually 15-30 minutes, max 60 minutes
+
+**Safe to interrupt**: Press Ctrl+C during wait - request stays active, re-run playbook to check status
+
+### Option 2: Request but Continue
+
+- Requests the increase
+- Continues deployment immediately
+- **Risk**: May fail when creating NAT gateways or load balancers
+
+### Option 3: Continue Anyway
+
+- No quota request
+- **Will likely fail** during infrastructure creation
+
+### Option 4: Abort
+
+- Exits safely
+- Request quota manually or wait and re-run
+
+## Manual Quota Increase (If Needed)
+
+If automatic request fails or you prefer manual control:
 
 ## How to Request Quota Increases
 

@@ -44,11 +44,12 @@ This guide explains how to use the Ansible playbooks to deploy two OpenShift 4.2
    # The playbook will prompt for the file path (default: ./pull-secret.json)
    ```
 
-5. **AWS Service Quotas** - Request increases BEFORE deployment
-   - **Elastic IPs**: Increase to 15 (default is 5)
-   - **EC2 instances**: Check m5.xlarge, m5.2xlarge, c5.metal limits
-   - See [AWS_QUOTAS.md](AWS_QUOTAS.md) for detailed instructions
-   - The playbook will check quotas and warn if insufficient
+5. **AWS Service Quotas** - Handled automatically!
+   - The playbook checks quotas during prerequisites
+   - If insufficient, it offers to request increases automatically
+   - Can wait for approval (15-30 min) before proceeding
+   - No manual action needed in most cases
+   - See [AWS_QUOTAS.md](AWS_QUOTAS.md) for details
 
 ### Verify Installation
 
