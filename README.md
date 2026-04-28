@@ -107,8 +107,11 @@ See [USAGE.md](USAGE.md) for detailed instructions.
 - AWS credentials with appropriate permissions
 - **Route53 public hosted zone** (playbook auto-discovers from your AWS account)
 - OpenShift pull secret from Red Hat
+- **AWS Quotas**: Elastic IPs (15+), EC2 instances - See [AWS_QUOTAS.md](AWS_QUOTAS.md)
 
 **Note:** Run `./setup.sh` to automatically create a Python virtual environment and install all required dependencies (Ansible, boto3, kubernetes, etc.)
+
+**Important:** Two OpenShift clusters in one region require increased AWS quotas. The playbook checks quotas automatically, but you should request increases before starting. See [AWS_QUOTAS.md](AWS_QUOTAS.md) for details.
 
 ## Configuration
 

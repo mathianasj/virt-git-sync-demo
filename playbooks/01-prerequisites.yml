@@ -17,6 +17,101 @@
       debug:
         msg: "Using AWS Account: {{ (aws_identity.stdout | from_json).Account }}"
 
+    - name: Check Elastic IP quota and usage
+      shell: |
+        aws service-quotas get-service-quota \
+          --service-code ec2 \
+          --quota-code L-0263D0A3 \
+          --region {{ aws_region }} \
+          --query 'Quota.Value' --output text 2>/dev/null || echo "5"
+      register: eip_quota_raw
+      changed_when: false
+      failed_when: false
+
+    - name: Check current Elastic IP usage
+      shell: |
+        aws ec2 describe-addresses --region {{ aws_region }} --query 'length(Addresses)' --output text
+      register: eip_usage_raw
+      changed_when: false
+
+    - name: Set EIP facts
+      set_fact:
+        eip_quota: "{{ eip_quota_raw.stdout | int }}"
+        eip_usage: "{{ eip_usage_raw.stdout | int }}"
+        eip_required: 8  # 3 NAT gateways + ~5 for two OpenShift clusters (LBs, etc.)
+
+    - name: Check VPC quota
+      shell: |
+        aws service-quotas get-service-quota \
+          --service-code vpc \
+          --quota-code L-F678F1CE \
+          --region {{ aws_region }} \
+          --query 'Quota.Value' --output text 2>/dev/null || echo "5"
+      register: vpc_quota_raw
+      changed_when: false
+      failed_when: false
+
+    - name: Check current VPC usage
+      shell: |
+        aws ec2 describe-vpcs --region {{ aws_region }} --query 'length(Vpcs)' --output text
+      register: vpc_usage_raw
+      changed_when: false
+
+    - name: Set VPC facts
+      set_fact:
+        vpc_quota: "{{ vpc_quota_raw.stdout | int }}"
+        vpc_usage: "{{ vpc_usage_raw.stdout | int }}"
+
+    - name: Display quota information
+      debug:
+        msg:
+          - "AWS Quota Check:"
+          - "  Elastic IPs: {{ eip_usage }}/{{ eip_quota }} used (need ~{{ eip_required }} for deployment)"
+          - "  VPCs: {{ vpc_usage }}/{{ vpc_quota }} used (need 1 for deployment)"
+
+    - name: Warn if EIP quota may be insufficient
+      debug:
+        msg:
+          - "=========================================="
+          - "WARNING: Elastic IP Quota May Be Insufficient"
+          - "=========================================="
+          - "Current EIP quota: {{ eip_quota }}"
+          - "Current EIP usage: {{ eip_usage }}"
+          - "Estimated need: ~{{ eip_required }} EIPs"
+          - "Available: {{ eip_quota - eip_usage }}"
+          - ""
+          - "Two OpenShift clusters require:"
+          - "  - 3 NAT Gateways (shared): 3 EIPs"
+          - "  - Load Balancers per cluster: ~2-3 EIPs each"
+          - "  - Total estimated: 8-10 EIPs"
+          - ""
+          - "To request quota increase:"
+          - "  1. Go to: https://console.aws.amazon.com/servicequotas"
+          - "  2. Search for 'EC2-VPC Elastic IPs'"
+          - "  3. Request increase to at least 15"
+          - "  4. Approval usually takes 15-30 minutes"
+          - ""
+          - "Or deploy clusters to different regions (see group_vars/all.yml)"
+          - "=========================================="
+      when: (eip_quota - eip_usage) < eip_required
+
+    - name: Pause for quota review
+      pause:
+        prompt: |
+
+          Elastic IP quota check: {{ eip_quota - eip_usage }} available, ~{{ eip_required }} needed
+
+          Do you want to continue? (yes/no)
+      register: quota_continue
+      when: (eip_quota - eip_usage) < eip_required
+
+    - name: Fail if user chooses not to continue
+      fail:
+        msg: "Deployment cancelled by user due to quota concerns"
+      when:
+        - (eip_quota - eip_usage) < eip_required
+        - quota_continue.user_input | lower != 'yes'
+
     - name: Verify Ansible version
       assert:
         that:
