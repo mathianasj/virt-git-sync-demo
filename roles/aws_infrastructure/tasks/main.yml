@@ -18,7 +18,7 @@
         "vpc_id": "{{ vpc_id }}",
         "public_subnet_ids": {{ public_subnet_ids | to_json }},
         "private_subnet_ids": {{ private_subnet_ids | to_json }},
-        "bastion_instance_id": "{{ bastion_instance.instance_id }}",
+        "bastion_instance_id": "{{ bastion_instance.instances[0].instance_id }}",
         "bastion_public_ip": "{{ bastion_public_ip }}",
         "security_group_ids": {
           "bastion": "{{ bastion_sg_id }}",
