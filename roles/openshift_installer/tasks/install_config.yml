@@ -9,6 +9,30 @@
     path: "{{ install_dir }}/auth/kubeconfig"
   register: kubeconfig_stat
 
+- name: Read pull secret from bastion
+  slurp:
+    src: /root/pull-secret.json
+  register: pull_secret_bastion
+  when:
+    - not install_config_stat.stat.exists
+    - not kubeconfig_stat.stat.exists
+
+- name: Read SSH public key from bastion
+  slurp:
+    src: /root/.ssh/openshift-key.pub
+  register: ssh_public_key_bastion
+  when:
+    - not install_config_stat.stat.exists
+    - not kubeconfig_stat.stat.exists
+
+- name: Set decoded file contents
+  set_fact:
+    pull_secret_content: "{{ pull_secret_bastion.content | b64decode }}"
+    ssh_public_key_content: "{{ ssh_public_key_bastion.content | b64decode | trim }}"
+  when:
+    - not install_config_stat.stat.exists
+    - not kubeconfig_stat.stat.exists
+
 - name: Create install-config.yaml from template
   template:
     src: install-config.yaml.j2

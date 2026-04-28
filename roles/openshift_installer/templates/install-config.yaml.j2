@@ -39,6 +39,6 @@ platform:
   aws:
     region: {{ aws_region }}
 publish: External
-pullSecret: '{{ lookup("file", "/root/pull-secret.json") | string }}'
+pullSecret: '{{ pull_secret_content | string }}'
 sshKey: |
-  {{ lookup("file", "/root/.ssh/openshift-key.pub") }}
+  {{ ssh_public_key_content }}
