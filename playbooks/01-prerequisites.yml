@@ -98,7 +98,7 @@
           - ""
           - "Or deploy clusters to different regions (see group_vars/all.yml)"
           - "=========================================="
-      when: (eip_quota - eip_usage) < eip_required
+      when: (eip_available | int) < (eip_required | int)
 
     - name: Pause for quota review
       pause:
