@@ -25,7 +25,7 @@
       - "{{ bastion_sg_id }}"
     network:
       assign_public_ip: yes
-    iam_instance_profile: "{{ bastion_profile.iam_instance_profile.instance_profile_name }}"
+    iam_instance_profile: OpenShiftBastionProfile
     tags:
       Name: "{{ vpc_name }}-bastion"
       Project: openshift-dual-cluster

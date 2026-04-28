@@ -32,6 +32,6 @@
 - name: Create instance profile for bastion
   amazon.aws.iam_instance_profile:
     name: OpenShiftBastionProfile
-    role: "{{ bastion_role.role_name }}"
+    role: OpenShiftBastionRole
     state: present
   register: bastion_profile
