@@ -39,6 +39,6 @@ platform:
   aws:
     region: {{ aws_region }}
 publish: External
-pullSecret: '{{ pull_secret_content | string }}'
+pullSecret: '{{ pull_secret_content }}'
 sshKey: |
   {{ ssh_public_key_content }}
