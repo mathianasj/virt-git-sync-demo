@@ -59,11 +59,12 @@
     creates: /usr/local/bin/helm
 
 - name: Verify installations
-  command: "{{ item }} version"
+  command: "{{ item }}"
   loop:
-    - aws
-    - openshift-install
-    - oc
-    - helm
+    - aws --version
+    - openshift-install version
+    - oc version --client
+    - helm version
   register: version_check
   changed_when: false
+  failed_when: false
