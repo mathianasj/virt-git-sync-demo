@@ -43,15 +43,26 @@
           - "OpenShift cluster {{ cluster_name }} installation complete!"
           - "Kubeconfig: {{ install_dir }}/auth/kubeconfig"
           - "Kubeadmin password: {{ install_dir }}/auth/kubeadmin-password"
+      when: final_kubeconfig.stat.exists
+
+    - name: Check if kubeadmin password file exists
+      stat:
+        path: "{{ install_dir }}/auth/kubeadmin-password"
+      register: kubeadmin_pass_file
+      when: final_kubeconfig.stat.exists
 
     - name: Read kubeadmin password
       slurp:
         src: "{{ install_dir }}/auth/kubeadmin-password"
       register: kubeadmin_pass
+      when:
+        - final_kubeconfig.stat.exists
+        - kubeadmin_pass_file.stat.exists
 
     - name: Log installation completion
       shell: |
         echo "$(date '+%Y-%m-%d %H:%M:%S') - OpenShift installation for {{ cluster_name }} completed successfully" >> {{ log_file }}
+      when: final_kubeconfig.stat.exists
 
   when: not (existing_cluster.stat.exists | default(false))
 
