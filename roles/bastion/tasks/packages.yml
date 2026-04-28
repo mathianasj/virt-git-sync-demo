@@ -18,6 +18,15 @@
       - unzip
     state: present
 
+- name: Install Python Kubernetes library
+  pip:
+    name:
+      - kubernetes
+      - openshift
+      - PyYAML
+    state: present
+    executable: pip3
+
 - name: Install AWS CLI
   shell: |
     curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "/tmp/awscliv2.zip"
