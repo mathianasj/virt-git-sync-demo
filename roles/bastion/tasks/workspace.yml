@@ -3,22 +3,34 @@
   file:
     path: "{{ item.install_dir }}"
     state: directory
+    owner: ec2-user
+    group: ec2-user
     mode: '0755'
   loop: "{{ clusters }}"
 
 - name: Copy pull secret to bastion
   copy:
     src: /tmp/pull-secret.json
-    dest: /root/pull-secret.json
+    dest: /home/ec2-user/pull-secret.json
+    owner: ec2-user
+    group: ec2-user
     mode: '0600'
 
-- name: Generate SSH key pair for OpenShift
-  openssh_keypair:
-    path: /root/.ssh/openshift-key
-    type: rsa
-    size: 4096
-    state: present
-  register: ssh_key
+- name: Copy ocp-bastion public key to bastion for OpenShift clusters
+  copy:
+    src: "{{ lookup('env', 'HOME') }}/.ssh/{{ bastion_key_name }}.pub"
+    dest: /home/ec2-user/.ssh/openshift-key.pub
+    owner: ec2-user
+    group: ec2-user
+    mode: '0644'
+
+- name: Copy ocp-bastion private key to bastion for OpenShift cluster access
+  copy:
+    src: "{{ lookup('env', 'HOME') }}/.ssh/{{ bastion_key_name }}"
+    dest: /home/ec2-user/.ssh/openshift-key
+    owner: ec2-user
+    group: ec2-user
+    mode: '0600'
 
 - name: Create state tracking file
   copy:
@@ -28,6 +40,8 @@
         "clusters": {}
       }
     dest: "{{ state_file }}"
+    owner: ec2-user
+    group: ec2-user
     mode: '0644'
     force: no
 
@@ -35,6 +49,8 @@
   file:
     path: "{{ log_file | dirname }}"
     state: directory
+    owner: ec2-user
+    group: ec2-user
     mode: '0755'
 
 - name: Initialize log file
@@ -45,5 +61,7 @@
       Started: {{ ansible_date_time.iso8601 }}
       ========================================
     dest: "{{ log_file }}"
+    owner: ec2-user
+    group: ec2-user
     mode: '0644'
     force: no

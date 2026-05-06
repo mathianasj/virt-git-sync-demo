@@ -1,0 +1,158 @@
+---
+- name: Gather bastion information
+  hosts: localhost
+  gather_facts: no
+  become: no
+  vars_files:
+    - /tmp/selected-domain.yml
+  tasks:
+    - name: Load global variables
+      include_vars:
+        file: "{{ playbook_dir }}/../group_vars/all.yml"
+
+    - name: Get bastion public IP from AWS
+      shell: |
+        aws ec2 describe-instances \
+          --region {{ aws_region }} \
+          --filters "Name=tag:Role,Values=bastion" "Name=instance-state-name,Values=running" \
+          --query 'Reservations[0].Instances[0].PublicIpAddress' \
+          --output text
+      register: bastion_ip_result
+      changed_when: false
+
+    - name: Add bastion to inventory
+      add_host:
+        name: bastion_host
+        groups: bastion_dynamic
+        ansible_host: "{{ bastion_ip_result.stdout }}"
+        ansible_user: "{{ bastion_user }}"
+        ansible_ssh_private_key_file: "~/.ssh/{{ bastion_key_name }}"
+        ansible_ssh_common_args: "-o StrictHostKeyChecking=no"
+        ansible_python_interpreter: /usr/bin/python3
+
+- name: Destroy OpenShift Clusters
+  hosts: bastion_dynamic
+  gather_facts: no
+  become: no
+  vars_files:
+    - /tmp/selected-domain.yml
+  pre_tasks:
+    - name: Load global variables
+      include_vars:
+        file: "{{ playbook_dir }}/../group_vars/all.yml"
+
+    - name: Update clusters configuration with selected domain
+      set_fact:
+        clusters: |
+          {% set updated_clusters = [] %}
+          {% for cluster in clusters %}
+          {% set _ = cluster.update({'base_domain': selected_base_domain}) %}
+          {% set _ = updated_clusters.append(cluster) %}
+          {% endfor %}
+          {{ updated_clusters }}
+
+  tasks:
+    - name: Display destruction warning
+      debug:
+        msg:
+          - "=========================================="
+          - "CLUSTER DESTRUCTION WARNING"
+          - "=========================================="
+          - "This will PERMANENTLY DESTROY:"
+          - ""
+          - "{% for cluster in clusters %}{{ cluster.cluster_name }}:{% endfor %}"
+          - "  - All OpenShift cluster resources"
+          - "  - EC2 instances (control plane & workers)"
+          - "  - Load balancers"
+          - "  - Route53 DNS records"
+          - "  - S3 buckets"
+          - "  - IAM roles (if created)"
+          - "  - Installation state files"
+          - ""
+          - "The following will NOT be destroyed:"
+          - "  - VPCs (manually created)"
+          - "  - Bastion host"
+          - "  - VPC peering connections"
+          - "=========================================="
+
+    - name: Pause for confirmation
+      pause:
+        prompt: "Type 'destroy' to continue with cluster destruction"
+      register: destroy_confirm
+
+    - name: Check confirmation
+      fail:
+        msg: "Cluster destruction cancelled"
+      when: destroy_confirm.user_input != 'destroy'
+
+    - name: Check if cluster install directories exist
+      stat:
+        path: "{{ item.install_dir }}"
+      loop: "{{ clusters }}"
+      loop_control:
+        label: "{{ item.cluster_name }}"
+      register: install_dir_check
+
+    - name: Kill existing tmux installation sessions
+      shell: |
+        tmux kill-session -t {{ item.tmux_session }} 2>/dev/null || echo "Session {{ item.tmux_session }} not found"
+      loop: "{{ clusters }}"
+      loop_control:
+        label: "{{ item.tmux_session }}"
+      register: tmux_kill
+      changed_when: false
+      failed_when: false
+
+    - name: Check if AWS credentials exist on bastion
+      stat:
+        path: /home/ec2-user/.aws/credentials
+      register: aws_creds_check
+
+    - name: Create .aws directory if missing
+      file:
+        path: /home/ec2-user/.aws
+        state: directory
+        owner: ec2-user
+        group: ec2-user
+        mode: '0700'
+      when: not aws_creds_check.stat.exists
+
+    - name: Copy AWS credentials to bastion if missing
+      copy:
+        src: ~/.aws/credentials
+        dest: /home/ec2-user/.aws/credentials
+        owner: ec2-user
+        group: ec2-user
+        mode: '0600'
+      when: not aws_creds_check.stat.exists
+
+    - name: Run openshift-install destroy for each cluster
+      shell: |
+        export AWS_ACCESS_KEY_ID=$(grep aws_access_key_id ~/.aws/credentials | head -1 | cut -d'=' -f2 | tr -d ' ')
+        export AWS_SECRET_ACCESS_KEY=$(grep aws_secret_access_key ~/.aws/credentials | head -1 | cut -d'=' -f2 | tr -d ' ')
+        cd {{ item.item.install_dir }}
+        openshift-install destroy cluster --dir={{ item.item.install_dir }} --log-level=debug 2>&1 | tee {{ item.item.install_dir }}/destroy.log
+      loop: "{{ install_dir_check.results }}"
+      loop_control:
+        label: "{{ item.item.cluster_name }}"
+      when: item.stat.exists
+      register: destroy_result
+      async: 3600  # 1 hour timeout
+      poll: 30     # Check every 30 seconds
+
+    - name: Display destruction results
+      debug:
+        msg:
+          - "=========================================="
+          - "Cluster Destruction Complete"
+          - "=========================================="
+          - "Destroyed clusters:"
+          - "{% for result in destroy_result.results %}{% if result.changed %}  ✓ {{ result.item.item.cluster_name }}{% endif %}{% endfor %}"
+          - ""
+          - "Destroy logs available at:"
+          - "{% for cluster in clusters %}  - {{ cluster.install_dir }}/destroy.log{% endfor %}"
+          - ""
+          - "Note: Install directories preserved for troubleshooting."
+          - "To remove them, run:"
+          - "  ansible-playbook playbooks/00-cleanup-install-configs.yml"
+          - "=========================================="

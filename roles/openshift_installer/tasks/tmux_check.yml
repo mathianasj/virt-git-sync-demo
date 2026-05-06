@@ -35,14 +35,30 @@
   shell: |
     cd {{ install_dir }}
     tmux new-session -d -s {{ tmux_session }} \
-      "openshift-install create cluster --dir={{ install_dir }} --log-level=debug 2>&1 | tee {{ install_dir }}/install.log"
+      "export AWS_ACCESS_KEY_ID=$(grep aws_access_key_id ~/.aws/credentials | head -1 | cut -d'=' -f2 | tr -d ' ') && \
+       export AWS_SECRET_ACCESS_KEY=$(grep aws_secret_access_key ~/.aws/credentials | head -1 | cut -d'=' -f2 | tr -d ' ') && \
+       openshift-install create cluster --dir={{ install_dir }} --log-level=debug 2>&1 | tee {{ install_dir }}/install.log"
+  when:
+    - not (existing_cluster.stat.exists | default(false))
+    - not (tmux_session_exists | default(false))
+
+- name: Ensure log file exists with correct ownership
+  file:
+    path: "{{ log_file }}"
+    state: touch
+    owner: ec2-user
+    group: ec2-user
+    mode: '0644'
+  become: yes
   when:
     - not (existing_cluster.stat.exists | default(false))
     - not (tmux_session_exists | default(false))
 
 - name: Log installation start
-  shell: |
-    echo "$(date '+%Y-%m-%d %H:%M:%S') - Started OpenShift installation for {{ cluster_name }} in tmux session {{ tmux_session }}" >> {{ log_file }}
+  lineinfile:
+    path: "{{ log_file }}"
+    line: "{{ ansible_date_time.date }} {{ ansible_date_time.time }} - Started OpenShift installation for {{ cluster_name }} in tmux session {{ tmux_session }}"
+    create: no
   when:
     - not (existing_cluster.stat.exists | default(false))
     - not (tmux_session_exists | default(false))
