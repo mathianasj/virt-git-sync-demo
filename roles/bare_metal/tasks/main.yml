@@ -1,11 +1,7 @@
 ---
-# Create MachineConfigs for BGP routing on bare metal nodes (before MachineSets)
-- name: Create MachineConfig for bare metal BGP routing on all clusters
-  include_tasks: create_machineconfig.yml
-  loop: "{{ clusters }}"
-  loop_control:
-    loop_var: cluster_config
-    label: "{{ cluster_config.cluster_name }}"
+# NOTE: Worker subnet default routing is handled at VPC route table level
+# The VPC route table for worker subnets points 0.0.0.0/0 to the BGP router ENI
+# No MachineConfig needed - AWS hypervisor routes traffic before it leaves the subnet
 
 # Deploy bare metal machinesets in parallel to both clusters
 - name: Create bare metal machinesets on all clusters in parallel
@@ -49,13 +45,6 @@
       - "=========================================="
       - "Bare Metal Deployment Complete"
       - "=========================================="
-      - "MachineConfig: 98-worker-cnv-bgp-gateway"
-      - "  - Applied to: worker-cnv role"
-      - "  - Hub default gateway: {{ hub_router_ip }}"
-      - "  - Managed default gateway: {{ managed_router_ip }}"
-      - "  - Method: NetworkManager (nmcli)"
-      - "  - Script: /usr/local/bin/set-gw.sh"
-      - ""
       - "MachineSets deployed in parallel to all clusters"
       - "  - Instance type: {{ bare_metal_instance_type }}"
       - "  - Replicas per cluster: {{ bare_metal_replicas }}"
@@ -64,9 +53,10 @@
       - "  - Total bare metal nodes: {{ (cnv_node_counts.results[0].stdout | int) + (cnv_node_counts.results[1].stdout | int) }}"
       - ""
       - "Routing Configuration:"
-      - "  - Primary interface default gateway → BGP router"
-      - "  - Configured via NetworkManager connection"
-      - "  - BGP router handles external connectivity"
-      - "  - Applied automatically via MachineConfig"
-      - "  - Follows Red Hat solution guide"
+      - "  - Routing handled at AWS VPC route table level"
+      - "  - Worker subnet default route (0.0.0.0/0) → BGP router ENI"
+      - "  - Hub worker subnet → {{ hub_router_ip }}"
+      - "  - Managed worker subnet → {{ managed_router_ip }}"
+      - "  - AWS hypervisor routes traffic (no OS-level config needed)"
+      - "  - Control plane subnets → NAT Gateway (split routing)"
       - "=========================================="
