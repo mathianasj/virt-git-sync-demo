@@ -1,0 +1,60 @@
+---
+- name: Create IAM policy for cert-manager Route53 access
+  amazon.aws.iam_managed_policy:
+    policy_name: CertManagerRoute53Policy
+    policy_description: Minimal Route53 permissions for cert-manager DNS-01 challenges
+    policy: "{{ lookup('file', 'route53-dns01-policy.json') }}"
+    state: present
+  register: certmanager_policy
+  delegate_to: localhost
+  become: no
+
+- name: Create IAM user for cert-manager
+  amazon.aws.iam_user:
+    name: cert-manager-route53
+    state: present
+  register: certmanager_user
+  delegate_to: localhost
+  become: no
+
+- name: Attach policy to cert-manager IAM user
+  amazon.aws.iam_user:
+    name: cert-manager-route53
+    managed_policies:
+      - "{{ certmanager_policy.policy.arn }}"
+    state: present
+  delegate_to: localhost
+  become: no
+
+- name: List existing access keys for cert-manager user
+  shell: |
+    aws iam list-access-keys --user-name cert-manager-route53 --query 'AccessKeyMetadata[].AccessKeyId' --output text
+  register: existing_access_keys
+  delegate_to: localhost
+  become: no
+  changed_when: false
+  failed_when: false
+
+- name: Delete existing access keys
+  shell: |
+    aws iam delete-access-key --user-name cert-manager-route53 --access-key-id {{ item }}
+  loop: "{{ existing_access_keys.stdout.split() }}"
+  delegate_to: localhost
+  become: no
+  when: existing_access_keys.stdout | length > 0
+  changed_when: true
+
+- name: Create access key for cert-manager user
+  amazon.aws.iam_access_key:
+    user_name: cert-manager-route53
+    state: present
+  register: certmanager_access_key
+  no_log: true
+  delegate_to: localhost
+  become: no
+
+- name: Save access key credentials
+  set_fact:
+    certmanager_aws_access_key_id: "{{ certmanager_access_key.access_key.access_key_id }}"
+    certmanager_aws_secret_access_key: "{{ certmanager_access_key.secret_access_key }}"
+  no_log: true

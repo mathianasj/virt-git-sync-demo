@@ -1,0 +1,95 @@
+---
+# ODF StorageClass Virtualization Annotation Policy
+# Sets the default virtualization storage class annotation for OpenShift Virtualization
+
+- name: Create ODF StorageClass virtualization annotation policy
+  kubernetes.core.k8s:
+    kubeconfig: "{{ hub_kubeconfig }}"
+    state: present
+    definition:
+      apiVersion: policy.open-cluster-management.io/v1
+      kind: Policy
+      metadata:
+        name: policy-odf-storageclass-virt-annotation
+        namespace: "{{ odf_policy_namespace }}"
+        annotations:
+          policy.open-cluster-management.io/standards: NIST-CSF
+          policy.open-cluster-management.io/categories: CM Configuration Management
+          policy.open-cluster-management.io/controls: CM-2 Baseline Configuration
+      spec:
+        remediationAction: enforce
+        disabled: false
+        policy-templates:
+          - objectDefinition:
+              apiVersion: policy.open-cluster-management.io/v1
+              kind: ConfigurationPolicy
+              metadata:
+                name: policy-odf-storageclass-virt-annotation
+              spec:
+                remediationAction: enforce
+                severity: low
+                object-templates:
+                  - complianceType: musthave
+                    objectDefinition:
+                      apiVersion: storage.k8s.io/v1
+                      kind: StorageClass
+                      metadata:
+                        name: ocs-storagecluster-ceph-rbd-virtualization
+                        annotations:
+                          storageclass.kubevirt.io/is-default-virt-class: "true"
+
+- name: Create PlacementRule for StorageClass annotation (all clusters)
+  kubernetes.core.k8s:
+    kubeconfig: "{{ hub_kubeconfig }}"
+    state: present
+    definition:
+      apiVersion: apps.open-cluster-management.io/v1
+      kind: PlacementRule
+      metadata:
+        name: placement-odf-storageclass-virt-annotation
+        namespace: "{{ odf_policy_namespace }}"
+      spec:
+        clusterSelector:
+          matchExpressions:
+            - key: vendor
+              operator: In
+              values:
+                - OpenShift
+
+- name: Create PlacementBinding for StorageClass annotation
+  kubernetes.core.k8s:
+    kubeconfig: "{{ hub_kubeconfig }}"
+    state: present
+    definition:
+      apiVersion: policy.open-cluster-management.io/v1
+      kind: PlacementBinding
+      metadata:
+        name: binding-odf-storageclass-virt-annotation
+        namespace: "{{ odf_policy_namespace }}"
+      placementRef:
+        name: placement-odf-storageclass-virt-annotation
+        kind: PlacementRule
+        apiGroup: apps.open-cluster-management.io
+      subjects:
+        - name: policy-odf-storageclass-virt-annotation
+          kind: Policy
+          apiGroup: policy.open-cluster-management.io
+
+- name: Wait for StorageClass annotation policy compliance on both clusters
+  shell: |
+    oc get policy policy-odf-storageclass-virt-annotation -n {{ odf_policy_namespace }} -o json | \
+    jq -r '.status.status[] | select(.compliant=="Compliant") | .clustername' | wc -l
+  environment:
+    KUBECONFIG: "{{ hub_kubeconfig }}"
+  register: storageclass_annotation_compliant_clusters
+  until: storageclass_annotation_compliant_clusters.stdout | int >= 2
+  retries: 30
+  delay: 10
+  changed_when: false
+
+- name: Display StorageClass annotation policy compliance status
+  debug:
+    msg:
+      - "ODF StorageClass virtualization annotation policy compliance achieved"
+      - "Compliant clusters: {{ storageclass_annotation_compliant_clusters.stdout }}"
+      - "StorageClass 'ocs-storagecluster-ceph-rbd-virtualization' is marked as default for OpenShift Virtualization"

@@ -1,0 +1,143 @@
+---
+- name: Create namespace for ODF policies
+  kubernetes.core.k8s:
+    kubeconfig: "{{ hub_kubeconfig }}"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ odf_policy_namespace }}"
+
+- name: Create ODF operator policy (both clusters)
+  kubernetes.core.k8s:
+    kubeconfig: "{{ hub_kubeconfig }}"
+    state: present
+    definition:
+      apiVersion: policy.open-cluster-management.io/v1
+      kind: Policy
+      metadata:
+        name: policy-odf-operator
+        namespace: "{{ odf_policy_namespace }}"
+        annotations:
+          policy.open-cluster-management.io/standards: NIST-CSF
+          policy.open-cluster-management.io/categories: CM Configuration Management
+          policy.open-cluster-management.io/controls: CM-2 Baseline Configuration
+      spec:
+        remediationAction: enforce
+        disabled: false
+        policy-templates:
+          - objectDefinition:
+              apiVersion: policy.open-cluster-management.io/v1
+              kind: ConfigurationPolicy
+              metadata:
+                name: policy-odf-namespace
+              spec:
+                remediationAction: enforce
+                severity: high
+                object-templates:
+                  - complianceType: musthave
+                    objectDefinition:
+                      apiVersion: v1
+                      kind: Namespace
+                      metadata:
+                        name: "{{ odf_namespace }}"
+                        labels:
+                          openshift.io/cluster-monitoring: "true"
+          - objectDefinition:
+              apiVersion: policy.open-cluster-management.io/v1
+              kind: ConfigurationPolicy
+              metadata:
+                name: policy-odf-operatorgroup
+              spec:
+                remediationAction: enforce
+                severity: high
+                object-templates:
+                  - complianceType: musthave
+                    objectDefinition:
+                      apiVersion: operators.coreos.com/v1
+                      kind: OperatorGroup
+                      metadata:
+                        name: openshift-storage-operatorgroup
+                        namespace: "{{ odf_namespace }}"
+                      spec:
+                        targetNamespaces:
+                          - "{{ odf_namespace }}"
+          - objectDefinition:
+              apiVersion: policy.open-cluster-management.io/v1
+              kind: ConfigurationPolicy
+              metadata:
+                name: policy-odf-subscription
+              spec:
+                remediationAction: enforce
+                severity: high
+                object-templates:
+                  - complianceType: musthave
+                    objectDefinition:
+                      apiVersion: operators.coreos.com/v1alpha1
+                      kind: Subscription
+                      metadata:
+                        name: odf-operator
+                        namespace: "{{ odf_namespace }}"
+                      spec:
+                        source: "{{ odf_operator_source }}"
+                        sourceNamespace: openshift-marketplace
+                        name: odf-operator
+                        channel: "{{ odf_operator_channel }}"
+                        installPlanApproval: Automatic
+
+- name: Create PlacementRule for ODF operator (all clusters)
+  kubernetes.core.k8s:
+    kubeconfig: "{{ hub_kubeconfig }}"
+    state: present
+    definition:
+      apiVersion: apps.open-cluster-management.io/v1
+      kind: PlacementRule
+      metadata:
+        name: placement-odf-operator
+        namespace: "{{ odf_policy_namespace }}"
+      spec:
+        clusterSelector:
+          matchExpressions:
+            - key: vendor
+              operator: In
+              values:
+                - OpenShift
+
+- name: Create PlacementBinding for ODF operator
+  kubernetes.core.k8s:
+    kubeconfig: "{{ hub_kubeconfig }}"
+    state: present
+    definition:
+      apiVersion: policy.open-cluster-management.io/v1
+      kind: PlacementBinding
+      metadata:
+        name: binding-odf-operator
+        namespace: "{{ odf_policy_namespace }}"
+      placementRef:
+        name: placement-odf-operator
+        kind: PlacementRule
+        apiGroup: apps.open-cluster-management.io
+      subjects:
+        - name: policy-odf-operator
+          kind: Policy
+          apiGroup: policy.open-cluster-management.io
+
+- name: Wait for operator policy compliance on both clusters
+  shell: |
+    oc get policy policy-odf-operator -n {{ odf_policy_namespace }} -o json | \
+    jq -r '.status.status[] | select(.compliant=="Compliant") | .clustername' | wc -l
+  environment:
+    KUBECONFIG: "{{ hub_kubeconfig }}"
+  register: operator_compliant_clusters
+  until: operator_compliant_clusters.stdout | int >= 2
+  retries: "{{ operator_timeout_minutes | int }}"
+  delay: 60
+  changed_when: false
+
+- name: Display operator policy compliance status
+  debug:
+    msg:
+      - "ODF operator policy compliance achieved"
+      - "Compliant clusters: {{ operator_compliant_clusters.stdout }}"
+      - "Operator installed on both clusters"

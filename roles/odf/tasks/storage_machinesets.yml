@@ -1,0 +1,171 @@
+---
+- name: Check existing ODF storage nodes on hub cluster
+  shell: |
+    oc get nodes -l cluster.ocs.openshift.io/openshift-storage --no-headers 2>/dev/null | grep " Ready " | wc -l
+  environment:
+    KUBECONFIG: "{{ clusters[0].install_dir }}/auth/kubeconfig"
+  register: hub_existing_nodes
+  changed_when: false
+  failed_when: false
+
+- name: Check existing ODF storage nodes on managed cluster
+  shell: |
+    oc get nodes -l cluster.ocs.openshift.io/openshift-storage --no-headers 2>/dev/null | grep " Ready " | wc -l
+  environment:
+    KUBECONFIG: "{{ clusters[1].install_dir }}/auth/kubeconfig"
+  register: managed_existing_nodes
+  changed_when: false
+  failed_when: false
+
+- name: Create ODF MachineSet on hub cluster
+  shell: |
+    export KUBECONFIG={{ clusters[0].install_dir }}/auth/kubeconfig
+
+    # Check if machineset already exists
+    if oc get machineset {{ odf_storage_machineset_name }} -n openshift-machine-api &>/dev/null; then
+      echo "MachineSet already exists, skipping creation"
+      exit 0
+    fi
+
+    # Get infrastructure ID
+    INFRA_ID=$(oc get machineset.machine.openshift.io -n openshift-machine-api -o json | jq -r '.items[0].metadata.labels["machine.openshift.io/cluster-api-cluster"]' 2>/dev/null)
+
+    # If no machinesets exist (UPI cluster), skip
+    if [ -z "$INFRA_ID" ] || [ "$INFRA_ID" == "null" ]; then
+      echo "No Machine API available, skipping MachineSet creation"
+      exit 0
+    fi
+
+    # Clone existing machineset and modify for ODF storage
+    oc get machineset.machine.openshift.io -n openshift-machine-api -o json | jq '.items[0]' | \
+    jq --arg name "${INFRA_ID}-{{ odf_storage_machineset_name }}" \
+       --arg replicas "{{ odf_storage_replicas }}" \
+       --arg instance_type "{{ odf_storage_instance_type }}" \
+       --arg volume_size "{{ odf_storage_volume_size }}" \
+       '
+      .metadata.name = $name |
+      .metadata.labels["machine.openshift.io/cluster-api-machineset"] = $name |
+      .spec.replicas = ($replicas | tonumber) |
+      .spec.selector.matchLabels["machine.openshift.io/cluster-api-machineset"] = $name |
+      .spec.template.metadata.labels["machine.openshift.io/cluster-api-machineset"] = $name |
+      .spec.template.metadata.labels["cluster.ocs.openshift.io/openshift-storage"] = "" |
+      .spec.template.spec.metadata.labels["cluster.ocs.openshift.io/openshift-storage"] = "" |
+      .spec.template.spec.taints = [
+        {
+          "key": "node.ocs.openshift.io/storage",
+          "value": "true",
+          "effect": "NoSchedule"
+        }
+      ] |
+      .spec.template.spec.providerSpec.value.instanceType = $instance_type |
+      .spec.template.spec.providerSpec.value.blockDeviceMappings += [
+        {
+          "deviceName": "/dev/sdb",
+          "ebs": {
+            "volumeSize": ($volume_size | tonumber),
+            "volumeType": "gp3",
+            "deleteOnTermination": true,
+            "encrypted": true,
+            "iops": 3000,
+            "throughput": 125
+          }
+        }
+      ] |
+      del(.status)
+      ' | oc apply -f -
+  when: hub_existing_nodes.stdout | int < odf_storage_replicas
+  changed_when: true
+  failed_when: false
+  register: hub_machineset_result
+
+- name: Create ODF MachineSet on managed cluster
+  shell: |
+    export KUBECONFIG={{ clusters[1].install_dir }}/auth/kubeconfig
+
+    # Check if machineset already exists
+    if oc get machineset {{ odf_storage_machineset_name }} -n openshift-machine-api &>/dev/null; then
+      echo "MachineSet already exists, skipping creation"
+      exit 0
+    fi
+
+    # Get infrastructure ID
+    INFRA_ID=$(oc get machineset.machine.openshift.io -n openshift-machine-api -o json | jq -r '.items[0].metadata.labels["machine.openshift.io/cluster-api-cluster"]' 2>/dev/null)
+
+    # If no machinesets exist (UPI cluster), skip
+    if [ -z "$INFRA_ID" ] || [ "$INFRA_ID" == "null" ]; then
+      echo "No Machine API available, skipping MachineSet creation"
+      exit 0
+    fi
+
+    # Clone existing machineset and modify for ODF storage
+    oc get machineset.machine.openshift.io -n openshift-machine-api -o json | jq '.items[0]' | \
+    jq --arg name "${INFRA_ID}-{{ odf_storage_machineset_name }}" \
+       --arg replicas "{{ odf_storage_replicas }}" \
+       --arg instance_type "{{ odf_storage_instance_type }}" \
+       --arg volume_size "{{ odf_storage_volume_size }}" \
+       '
+      .metadata.name = $name |
+      .metadata.labels["machine.openshift.io/cluster-api-machineset"] = $name |
+      .spec.replicas = ($replicas | tonumber) |
+      .spec.selector.matchLabels["machine.openshift.io/cluster-api-machineset"] = $name |
+      .spec.template.metadata.labels["machine.openshift.io/cluster-api-machineset"] = $name |
+      .spec.template.metadata.labels["cluster.ocs.openshift.io/openshift-storage"] = "" |
+      .spec.template.spec.metadata.labels["cluster.ocs.openshift.io/openshift-storage"] = "" |
+      .spec.template.spec.taints = [
+        {
+          "key": "node.ocs.openshift.io/storage",
+          "value": "true",
+          "effect": "NoSchedule"
+        }
+      ] |
+      .spec.template.spec.providerSpec.value.instanceType = $instance_type |
+      .spec.template.spec.providerSpec.value.blockDeviceMappings += [
+        {
+          "deviceName": "/dev/sdb",
+          "ebs": {
+            "volumeSize": ($volume_size | tonumber),
+            "volumeType": "gp3",
+            "deleteOnTermination": true,
+            "encrypted": true,
+            "iops": 3000,
+            "throughput": 125
+          }
+        }
+      ] |
+      del(.status)
+      ' | oc apply -f -
+  when: managed_existing_nodes.stdout | int < odf_storage_replicas
+  changed_when: true
+  failed_when: false
+  register: managed_machineset_result
+
+- name: Wait for ODF storage nodes on hub cluster
+  shell: |
+    oc get nodes -l cluster.ocs.openshift.io/openshift-storage --no-headers 2>/dev/null | grep " Ready " | wc -l
+  environment:
+    KUBECONFIG: "{{ clusters[0].install_dir }}/auth/kubeconfig"
+  register: hub_storage_nodes
+  until: hub_storage_nodes.stdout | int >= odf_storage_replicas
+  retries: "{{ machineset_timeout_minutes | int }}"
+  delay: 60
+  changed_when: false
+
+- name: Wait for ODF storage nodes on managed cluster
+  shell: |
+    oc get nodes -l cluster.ocs.openshift.io/openshift-storage --no-headers 2>/dev/null | grep " Ready " | wc -l
+  environment:
+    KUBECONFIG: "{{ clusters[1].install_dir }}/auth/kubeconfig"
+  register: managed_storage_nodes
+  until: managed_storage_nodes.stdout | int >= odf_storage_replicas
+  retries: "{{ machineset_timeout_minutes | int }}"
+  delay: 60
+  changed_when: false
+
+- name: Display storage nodes status
+  debug:
+    msg:
+      - "ODF storage nodes verified successfully"
+      - "Hub cluster: {{ hub_storage_nodes.stdout }} nodes"
+      - "Managed cluster: {{ managed_storage_nodes.stdout }} nodes"
+      - "Instance type: {{ odf_storage_instance_type }}"
+      - "Storage per node: {{ odf_storage_volume_size }}GB"

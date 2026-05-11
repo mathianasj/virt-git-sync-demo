@@ -32,6 +32,46 @@
     group: ec2-user
     mode: '0600'
 
+- name: Copy ocp-bastion private key to bastion with original name (for router access)
+  copy:
+    src: "{{ lookup('env', 'HOME') }}/.ssh/{{ bastion_key_name }}"
+    dest: /home/ec2-user/.ssh/{{ bastion_key_name }}
+    owner: ec2-user
+    group: ec2-user
+    mode: '0600'
+
+- name: Create .aws directory on bastion
+  file:
+    path: /home/ec2-user/.aws
+    state: directory
+    owner: ec2-user
+    group: ec2-user
+    mode: '0755'
+
+- name: Check if AWS credentials file exists locally
+  stat:
+    path: /tmp/aws-installer-credentials
+  register: aws_creds_file
+  delegate_to: localhost
+  become: no
+
+- name: Copy AWS installer credentials to bastion
+  copy:
+    src: /tmp/aws-installer-credentials
+    dest: /home/ec2-user/.aws/credentials
+    owner: ec2-user
+    group: ec2-user
+    mode: '0600'
+  when: aws_creds_file.stat.exists
+
+- name: Remove local credentials file (security cleanup)
+  file:
+    path: /tmp/aws-installer-credentials
+    state: absent
+  delegate_to: localhost
+  become: no
+  when: aws_creds_file.stat.exists
+
 - name: Create state tracking file
   copy:
     content: |

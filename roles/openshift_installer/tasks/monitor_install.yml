@@ -1,23 +1,26 @@
 ---
 - name: Monitor OpenShift installation progress
   block:
-    - name: Check installation status via tmux
+    - name: Check installation status via tmux or log file
       shell: |
         if tmux has-session -t {{ tmux_session }} 2>/dev/null; then
           tmux capture-pane -t {{ tmux_session }} -p | tail -50
+        elif [ -f {{ install_dir }}/install.log ]; then
+          tail -100 {{ install_dir }}/install.log
         else
-          echo "TMUX_SESSION_NOT_FOUND"
+          echo "NO_INSTALL_RUNNING"
         fi
       register: install_status
       until: >
         'Install complete!' in install_status.stdout or
-        'failed' in install_status.stdout.lower() or
-        'error' in install_status.stdout.lower() or
-        'TMUX_SESSION_NOT_FOUND' in install_status.stdout or
         existing_cluster.stat.exists
       retries: "{{ (installation_timeout_minutes | int) }}"
       delay: 60
       changed_when: false
+      failed_when: >
+        ('NO_INSTALL_RUNNING' in install_status.stdout or
+        'failed' in install_status.stdout.lower()) and
+        not existing_cluster.stat.exists
 
     - name: Check if tmux session disappeared (installation complete)
       shell: tmux has-session -t {{ tmux_session }} 2>/dev/null
@@ -32,10 +35,8 @@
 
     - name: Fail if installation did not complete successfully
       fail:
-        msg: "OpenShift installation for {{ cluster_name }} failed. Check {{ install_dir }}/install.log"
-      when:
-        - not final_kubeconfig.stat.exists
-        - "'failed' in install_status.stdout.lower() or 'error' in install_status.stdout.lower()"
+        msg: "OpenShift installation for {{ cluster_name }} failed. Check {{ install_dir }}/install.log for details"
+      when: not final_kubeconfig.stat.exists
 
     - name: Display installation completion
       debug:
@@ -60,8 +61,10 @@
         - kubeadmin_pass_file.stat.exists
 
     - name: Log installation completion
-      shell: |
-        echo "$(date '+%Y-%m-%d %H:%M:%S') - OpenShift installation for {{ cluster_name }} completed successfully" >> {{ log_file }}
+      lineinfile:
+        path: "{{ log_file }}"
+        line: "{{ ansible_date_time.date }} {{ ansible_date_time.time }} - OpenShift installation for {{ cluster_name }} completed successfully"
+        create: no
       when: final_kubeconfig.stat.exists
 
   when: not (existing_cluster.stat.exists | default(false))

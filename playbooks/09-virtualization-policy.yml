@@ -1,0 +1,82 @@
+---
+- name: Gather bastion information
+  hosts: localhost
+  gather_facts: no
+  become: no
+  vars_files:
+    - /tmp/selected-domain.yml
+  tasks:
+    - name: Load global variables
+      include_vars:
+        file: "{{ playbook_dir }}/../group_vars/all.yml"
+
+    - name: Display phase timing information
+      debug:
+        msg:
+          - "=========================================="
+          - "Phase 9: OpenShift Virtualization Policy"
+          - "=========================================="
+          - "Expected Runtime: 5-10 minutes"
+          - "Started: {{ ansible_date_time.time }}"
+          - "Estimated Completion: {{ '%02d:%02d' | format((ansible_date_time.hour | int + ((ansible_date_time.minute | int + 5) // 60)) % 24, (ansible_date_time.minute | int + 5) % 60) }}"
+          - "=========================================="
+
+    - name: Get bastion public IP from AWS
+      shell: |
+        aws ec2 describe-instances \
+          --region {{ aws_region }} \
+          --filters "Name=tag:Role,Values=bastion" "Name=instance-state-name,Values=running" \
+          --query 'Reservations[0].Instances[0].PublicIpAddress' \
+          --output text
+      register: bastion_ip_result
+      changed_when: false
+
+    - name: Add bastion to inventory
+      add_host:
+        name: bastion_host
+        groups: bastion_dynamic
+        ansible_host: "{{ bastion_ip_result.stdout }}"
+        ansible_user: "{{ bastion_user }}"
+        ansible_ssh_private_key_file: "~/.ssh/{{ bastion_key_name }}"
+        ansible_ssh_common_args: "-o StrictHostKeyChecking=no"
+        ansible_python_interpreter: /usr/bin/python3
+
+- name: Phase 8 - OpenShift Virtualization Deployment via ACM
+  hosts: bastion_dynamic
+  gather_facts: no
+  become: no
+  vars_files:
+    - /tmp/selected-domain.yml
+  pre_tasks:
+    - name: Load global variables
+      include_vars:
+        file: "{{ playbook_dir }}/../group_vars/all.yml"
+
+    - name: Update clusters configuration with selected domain
+      set_fact:
+        clusters: |
+          {% set updated_clusters = [] %}
+          {% for cluster in clusters %}
+          {% set _ = cluster.update({'base_domain': selected_base_domain}) %}
+          {% set _ = updated_clusters.append(cluster) %}
+          {% endfor %}
+          {{ updated_clusters }}
+  vars:
+    hub_cluster: "{{ clusters[0] }}"
+
+  tasks:
+    - name: Deploy OpenShift Virtualization policy
+      include_role:
+        name: cnv_policy
+      vars:
+        hub_kubeconfig: "{{ hub_cluster.install_dir }}/auth/kubeconfig"
+
+  post_tasks:
+    - name: Display OpenShift Virtualization deployment status
+      debug:
+        msg:
+          - "OpenShift Virtualization deployed via ACM policy"
+          - "Target clusters: Both hub and managed"
+          - "Operator namespace: {{ cnv_namespace }}"
+          - "HyperConverged CR: Deployed"
+          - "Verify: oc get hyperconverged -n {{ cnv_namespace }}"

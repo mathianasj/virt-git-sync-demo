@@ -1,0 +1,89 @@
+---
+# Update a single route table to point default route to BGP router
+# This file is included by update_worker_routes.yml
+
+- name: Get current default route for route table {{ route_table_id }}
+  shell: |
+    aws ec2 describe-route-tables \
+      --region {{ aws_region }} \
+      --route-table-ids {{ route_table_id }} \
+      --query 'RouteTables[0].Routes[?DestinationCidrBlock==`0.0.0.0/0`]' \
+      --output json
+  register: current_default_route
+  changed_when: false
+  delegate_to: localhost
+
+- name: Save current default route backup
+  copy:
+    content: "{{ current_default_route.stdout }}"
+    dest: "{{ route_backup_dir | default('/tmp/route-backups') }}/{{ cluster_name }}-{{ route_table_id }}.json"
+    mode: '0644'
+  delegate_to: localhost
+
+- name: Display current default route
+  debug:
+    msg:
+      - "Route Table: {{ route_table_id }} ({{ route_table_name }})"
+      - "Subnet: {{ subnet_id }}"
+      - "Current Default Route: {{ current_default_route.stdout | from_json }}"
+      - "Backup: {{ route_backup_dir | default('/tmp/route-backups') }}/{{ cluster_name }}-{{ route_table_id }}.json"
+
+- name: Check if default route already points to router
+  set_fact:
+    route_already_correct: "{{ (current_default_route.stdout | from_json | first).InstanceId | default('') == router_instance_id }}"
+  when: (current_default_route.stdout | from_json | length) > 0
+
+- name: Skip update if route already correct
+  debug:
+    msg: "Route table {{ route_table_id }} already routes to {{ router_instance_id }}, skipping"
+  when: route_already_correct | default(false)
+
+- name: Delete current default route
+  shell: |
+    aws ec2 delete-route \
+      --region {{ aws_region }} \
+      --route-table-id {{ route_table_id }} \
+      --destination-cidr-block 0.0.0.0/0
+  register: delete_result
+  changed_when: delete_result.rc == 0
+  failed_when: false
+  delegate_to: localhost
+  when: not (route_already_correct | default(false))
+
+- name: Display delete result
+  debug:
+    msg: "Deleted default route from {{ route_table_id }}: {{ 'SUCCESS' if delete_result.rc == 0 else 'FAILED (may not exist)' }}"
+  when: not (route_already_correct | default(false))
+
+- name: Create new default route via BGP router
+  shell: |
+    aws ec2 create-route \
+      --region {{ aws_region }} \
+      --route-table-id {{ route_table_id }} \
+      --destination-cidr-block 0.0.0.0/0 \
+      --instance-id {{ router_instance_id }}
+  register: create_result
+  changed_when: create_result.rc == 0
+  retries: 3
+  delay: 5
+  until: create_result.rc == 0
+  delegate_to: localhost
+  when: not (route_already_correct | default(false))
+
+- name: Verify new route created successfully
+  shell: |
+    aws ec2 describe-route-tables \
+      --region {{ aws_region }} \
+      --route-table-ids {{ route_table_id }} \
+      --query 'RouteTables[0].Routes[?DestinationCidrBlock==`0.0.0.0/0`]' \
+      --output json
+  register: new_route
+  changed_when: false
+  delegate_to: localhost
+
+- name: Display new route configuration
+  debug:
+    msg:
+      - "Route Table {{ route_table_id }} Updated:"
+      - "  New Default Route: {{ new_route.stdout | from_json }}"
+      - "  Status: {{ 'UPDATED' if not (route_already_correct | default(false)) else 'ALREADY CORRECT' }}"

@@ -1,0 +1,10 @@
+---
+# ODF operator defaults
+odf_namespace: openshift-storage
+odf_operator_channel: stable-4.20
+odf_operator_source: redhat-operators
+odf_policy_namespace: odf-policies
+odf_storage_instance_type: m5.2xlarge
+odf_storage_replicas: 3
+odf_storage_machineset_name: odf-storage
+odf_storage_volume_size: 500

@@ -10,6 +10,17 @@
       include_vars:
         file: "{{ playbook_dir }}/../group_vars/all.yml"
 
+    - name: Display phase timing information
+      debug:
+        msg:
+          - "=========================================="
+          - "Phase 3: Bastion Host Configuration"
+          - "=========================================="
+          - "Expected Runtime: 3-5 minutes"
+          - "Started: {{ ansible_date_time.time }}"
+          - "Estimated Completion: {{ '%02d:%02d' | format((ansible_date_time.hour | int + ((ansible_date_time.minute | int + 5) // 60)) % 24, (ansible_date_time.minute | int + 5) % 60) }}"
+          - "=========================================="
+
     - name: Update clusters configuration with selected domain
       set_fact:
         clusters: |

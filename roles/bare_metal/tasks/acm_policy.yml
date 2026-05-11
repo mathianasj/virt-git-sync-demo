@@ -1,0 +1,245 @@
+---
+- name: Set hub kubeconfig environment
+  set_fact:
+    hub_kubeconfig_env:
+      KUBECONFIG: "{{ hub_kubeconfig }}"
+
+- name: Get cluster details for both clusters
+  shell: |
+    oc get managedcluster {{ item.cluster_name }} -o jsonpath='{.metadata.name}'
+  environment: "{{ hub_kubeconfig_env }}"
+  loop: "{{ clusters }}"
+  register: cluster_names
+  changed_when: false
+
+- name: Gather machineset details from hub cluster
+  shell: |
+    export KUBECONFIG={{ clusters[0].install_dir }}/auth/kubeconfig
+    oc get machineset.machine.openshift.io -n openshift-machine-api -o json | jq '.items[0]'
+  register: hub_base_machineset
+  changed_when: false
+
+- name: Parse hub base machineset
+  set_fact:
+    hub_ms_json: "{{ hub_base_machineset.stdout | from_json }}"
+
+- name: Extract hub cluster infrastructure ID
+  set_fact:
+    hub_infra_id: "{{ hub_ms_json.metadata.labels['machine.openshift.io/cluster-api-cluster'] }}"
+    hub_ami_id: "{{ hub_ms_json.spec.template.spec.providerSpec.value.ami.id }}"
+    hub_iam_profile: "{{ hub_ms_json.spec.template.spec.providerSpec.value.iamInstanceProfile.id }}"
+    hub_security_groups: "{{ hub_ms_json.spec.template.spec.providerSpec.value.securityGroups }}"
+    hub_subnet: "{{ hub_ms_json.spec.template.spec.providerSpec.value.subnet }}"
+
+- name: Gather machineset details from managed cluster
+  shell: |
+    export KUBECONFIG={{ clusters[1].install_dir }}/auth/kubeconfig
+    oc get machineset.machine.openshift.io -n openshift-machine-api -o json | jq '.items[0]'
+  register: managed_base_machineset
+  changed_when: false
+
+- name: Parse managed base machineset
+  set_fact:
+    managed_ms_json: "{{ managed_base_machineset.stdout | from_json }}"
+
+- name: Extract managed cluster infrastructure ID
+  set_fact:
+    managed_infra_id: "{{ managed_ms_json.metadata.labels['machine.openshift.io/cluster-api-cluster'] }}"
+    managed_ami_id: "{{ managed_ms_json.spec.template.spec.providerSpec.value.ami.id }}"
+    managed_iam_profile: "{{ managed_ms_json.spec.template.spec.providerSpec.value.iamInstanceProfile.id }}"
+    managed_security_groups: "{{ managed_ms_json.spec.template.spec.providerSpec.value.securityGroups }}"
+    managed_subnet: "{{ managed_ms_json.spec.template.spec.providerSpec.value.subnet }}"
+
+- name: Create namespace for bare metal policies
+  kubernetes.core.k8s:
+    kubeconfig: "{{ hub_kubeconfig }}"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: bare-metal-policies
+
+- name: Create Placement for all clusters
+  kubernetes.core.k8s:
+    kubeconfig: "{{ hub_kubeconfig }}"
+    state: present
+    definition:
+      apiVersion: cluster.open-cluster-management.io/v1beta1
+      kind: Placement
+      metadata:
+        name: all-clusters
+        namespace: bare-metal-policies
+      spec:
+        predicates:
+        - requiredClusterSelector:
+            labelSelector:
+              matchExpressions:
+              - key: name
+                operator: In
+                values:
+                - local-cluster
+                - managed
+
+- name: Create Policy for bare metal machinesets
+  kubernetes.core.k8s:
+    kubeconfig: "{{ hub_kubeconfig }}"
+    state: present
+    definition:
+      apiVersion: policy.open-cluster-management.io/v1
+      kind: Policy
+      metadata:
+        name: bare-metal-machineset-policy
+        namespace: bare-metal-policies
+      spec:
+        disabled: false
+        remediationAction: enforce
+        policy-templates:
+        - objectDefinition:
+            apiVersion: policy.open-cluster-management.io/v1
+            kind: ConfigurationPolicy
+            metadata:
+              name: bare-metal-machineset-hub
+            spec:
+              remediationAction: enforce
+              severity: high
+              object-templates:
+              - complianceType: musthave
+                objectDefinition:
+                  apiVersion: machine.openshift.io/v1beta1
+                  kind: MachineSet
+                  metadata:
+                    name: "{{ '{{' }} (lookup 'cluster.open-cluster-management.io/v1' 'ManagedCluster' '' 'local-cluster').metadata.labels.clusterID {{ '}}' }}-{{ bare_metal_machineset_name }}"
+                    namespace: openshift-machine-api
+                  spec:
+                    replicas: {{ bare_metal_replicas }}
+                    selector:
+                      matchLabels:
+                        machine.openshift.io/cluster-api-cluster: "{{ '{{' }} (lookup 'cluster.open-cluster-management.io/v1' 'ManagedCluster' '' 'local-cluster').metadata.labels.clusterID {{ '}}' }}"
+                        machine.openshift.io/cluster-api-machineset: "{{ '{{' }} (lookup 'cluster.open-cluster-management.io/v1' 'ManagedCluster' '' 'local-cluster').metadata.labels.clusterID {{ '}}' }}-{{ bare_metal_machineset_name }}"
+                    template:
+                      metadata:
+                        labels:
+                          machine.openshift.io/cluster-api-cluster: "{{ '{{' }} (lookup 'cluster.open-cluster-management.io/v1' 'ManagedCluster' '' 'local-cluster').metadata.labels.clusterID {{ '}}' }}"
+                          machine.openshift.io/cluster-api-machine-role: worker
+                          machine.openshift.io/cluster-api-machine-type: worker
+                          machine.openshift.io/cluster-api-machineset: "{{ '{{' }} (lookup 'cluster.open-cluster-management.io/v1' 'ManagedCluster' '' 'local-cluster').metadata.labels.clusterID {{ '}}' }}-{{ bare_metal_machineset_name }}"
+                          node-role.kubernetes.io/worker-cnv: ""
+                      spec:
+                        metadata:
+                          labels:
+                            node-role.kubernetes.io/worker-cnv: ""
+                        providerSpec:
+                          value:
+                            apiVersion: machine.openshift.io/v1beta1
+                            kind: AWSMachineProviderConfig
+                            ami:
+                              id: "{{ '{{' }} if eq .ManagedClusterName \"local-cluster\" \"{{ hub_ami_id }}\" \"{{ managed_ami_id }}\" {{ '}}' }}"
+                            instanceType: "{{ bare_metal_instance_type }}"
+                            placement:
+                              region: "{{ aws_region }}"
+                              availabilityZone: "{{ aws_region }}a"
+                            iamInstanceProfile:
+                              id: "{{ '{{' }} if eq .ManagedClusterName \"local-cluster\" \"{{ hub_iam_profile }}\" \"{{ managed_iam_profile }}\" {{ '}}' }}"
+                            securityGroups: "{{ '{{' }} if eq .ManagedClusterName \"local-cluster\" {{ hub_security_groups | to_json }} {{ managed_security_groups | to_json }} {{ '}}' }}"
+                            subnet: "{{ '{{' }} if eq .ManagedClusterName \"local-cluster\" {{ hub_subnet | to_json }} {{ managed_subnet | to_json }} {{ '}}' }}"
+                            userDataSecret:
+                              name: worker-user-data
+                            tags:
+                            - name: "kubernetes.io/cluster/{{ '{{' }} (lookup 'cluster.open-cluster-management.io/v1' 'ManagedCluster' '' 'local-cluster').metadata.labels.clusterID {{ '}}' }}"
+                              value: owned
+
+- name: Create PlacementBinding
+  kubernetes.core.k8s:
+    kubeconfig: "{{ hub_kubeconfig }}"
+    state: present
+    definition:
+      apiVersion: policy.open-cluster-management.io/v1
+      kind: PlacementBinding
+      metadata:
+        name: bare-metal-machineset-binding
+        namespace: bare-metal-policies
+      spec:
+        placementRef:
+          apiGroup: cluster.open-cluster-management.io
+          kind: Placement
+          name: all-clusters
+        subjects:
+        - apiGroup: policy.open-cluster-management.io
+          kind: Policy
+          name: bare-metal-machineset-policy
+
+- name: Wait for policy to be compliant on all clusters
+  shell: |
+    oc get policy bare-metal-machineset-policy -n bare-metal-policies -o jsonpath='{.status.compliant}'
+  environment: "{{ hub_kubeconfig_env }}"
+  register: policy_status
+  until: policy_status.stdout == "Compliant"
+  retries: 5
+  delay: 30
+  changed_when: false
+
+- name: Monitor bare metal nodes on both clusters concurrently
+  shell: |
+    KUBECONFIG={{ item.install_dir }}/auth/kubeconfig
+    TIMEOUT={{ machineset_timeout_minutes | int }}
+    ELAPSED=0
+
+    while [ $ELAPSED -lt $TIMEOUT ]; do
+      READY_COUNT=$(oc get nodes -l node-role.kubernetes.io/worker-cnv --no-headers 2>/dev/null | grep " Ready " | wc -l)
+
+      if [ "$READY_COUNT" -ge "{{ bare_metal_replicas }}" ]; then
+        echo "{{ item.cluster_name }}: {{ bare_metal_replicas }} bare metal nodes ready"
+        exit 0
+      fi
+
+      sleep 60
+      ELAPSED=$((ELAPSED + 1))
+    done
+
+    echo "{{ item.cluster_name }}: Timeout waiting for bare metal nodes"
+    exit 1
+  loop: "{{ clusters }}"
+  loop_control:
+    label: "{{ item.cluster_name }}"
+  async: 3600
+  poll: 0
+  register: node_monitoring_jobs
+
+- name: Wait for all clusters to have bare metal nodes ready
+  async_status:
+    jid: "{{ item.ansible_job_id }}"
+  loop: "{{ node_monitoring_jobs.results }}"
+  loop_control:
+    label: "{{ item.item.cluster_name }}"
+  register: node_monitoring_results
+  until: node_monitoring_results.finished
+  retries: 60
+  delay: 60
+
+- name: Display monitoring results
+  debug:
+    msg: "{{ item.stdout_lines }}"
+  loop: "{{ node_monitoring_results.results }}"
+  loop_control:
+    label: "{{ item.item.item.cluster_name }}"
+
+- name: Verify CNV-labeled nodes on both clusters
+  shell: |
+    export KUBECONFIG={{ item.install_dir }}/auth/kubeconfig
+    oc get nodes -l node-role.kubernetes.io/worker-cnv --no-headers | wc -l
+  loop: "{{ clusters }}"
+  loop_control:
+    label: "{{ item.cluster_name }}"
+  register: cnv_node_counts
+  changed_when: false
+
+- name: Display bare metal deployment status
+  debug:
+    msg:
+      - "Bare metal machinesets deployed via ACM policy to all clusters"
+      - "Instance type: {{ bare_metal_instance_type }}"
+      - "Replicas per cluster: {{ bare_metal_replicas }}"
+      - "Hub cluster CNV nodes: {{ cnv_node_counts.results[0].stdout }}"
+      - "Managed cluster CNV nodes: {{ cnv_node_counts.results[1].stdout }}"
+      - "Total bare metal nodes: {{ (cnv_node_counts.results[0].stdout | int) + (cnv_node_counts.results[1].stdout | int) }}"

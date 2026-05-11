@@ -1,0 +1,11 @@
+---
+# Router EC2 defaults (Amazon Linux 2 + FRRouting)
+router_instance_type: t3.small
+router_availability_zone: us-east-1a
+router_key_name: ocp-bastion-key
+router_user: ec2-user
+
+# Static IP addresses for BGP routers (must be within worker subnets)
+# These IPs are used as default gateway for c5.metal bare metal nodes
+hub_router_ip: 10.0.11.111
+managed_router_ip: 10.1.11.224

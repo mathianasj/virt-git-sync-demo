@@ -1,0 +1,338 @@
+---
+# Create multiple VPCs with non-overlapping CIDR ranges
+
+- name: Create bastion VPC
+  amazon.aws.ec2_vpc_net:
+    name: "{{ bastion_vpc.name }}"
+    cidr_block: "{{ bastion_vpc.cidr }}"
+    region: "{{ aws_region }}"
+    tags:
+      Name: "{{ bastion_vpc.name }}"
+      Project: openshift-dual-cluster
+      Purpose: bastion
+    state: present
+  register: bastion_vpc_result
+
+- name: Set bastion VPC ID fact
+  set_fact:
+    bastion_vpc_id: "{{ bastion_vpc_result.vpc.id }}"
+
+- name: Create internet gateway for bastion VPC
+  amazon.aws.ec2_vpc_igw:
+    vpc_id: "{{ bastion_vpc_id }}"
+    region: "{{ aws_region }}"
+    tags:
+      Name: "{{ bastion_vpc.name }}-igw"
+      Project: openshift-dual-cluster
+    state: present
+  register: bastion_igw
+
+- name: Create bastion public subnet
+  amazon.aws.ec2_vpc_subnet:
+    vpc_id: "{{ bastion_vpc_id }}"
+    cidr: "{{ item.cidr }}"
+    az: "{{ item.az }}"
+    region: "{{ aws_region }}"
+    map_public: yes
+    tags:
+      Name: "{{ bastion_vpc.name }}-public-{{ item.az }}"
+      Project: openshift-dual-cluster
+      Type: public
+    state: present
+  loop: "{{ bastion_vpc.public_subnets }}"
+  register: bastion_public_subnets_result
+
+- name: Set bastion public subnet IDs fact
+  set_fact:
+    bastion_public_subnet_id: "{{ bastion_public_subnets_result.results[0].subnet.id }}"
+
+- name: Create bastion public route table
+  amazon.aws.ec2_vpc_route_table:
+    vpc_id: "{{ bastion_vpc_id }}"
+    region: "{{ aws_region }}"
+    tags:
+      Name: "{{ bastion_vpc.name }}-public-rt"
+      Project: openshift-dual-cluster
+    subnets:
+      - "{{ bastion_public_subnet_id }}"
+    routes:
+      - dest: 0.0.0.0/0
+        gateway_id: "{{ bastion_igw.gateway_id }}"
+    state: present
+
+- name: Create cluster VPCs
+  amazon.aws.ec2_vpc_net:
+    name: "{{ item.name }}"
+    cidr_block: "{{ item.cidr }}"
+    region: "{{ aws_region }}"
+    tags:
+      Name: "{{ item.name }}"
+      Project: openshift-dual-cluster
+      Cluster: "{{ item.cluster }}"
+    state: present
+  loop: "{{ vpcs }}"
+  register: cluster_vpcs_result
+
+- name: Set VPC ID facts
+  set_fact:
+    cluster_vpc_ids: "{{ cluster_vpcs_result.results | map(attribute='vpc.id') | list }}"
+    vpc_map: |
+      {% set vpc_dict = {} %}
+      {% for result in cluster_vpcs_result.results %}
+      {% set _ = vpc_dict.update({result.item.name: result.vpc.id}) %}
+      {% endfor %}
+      {{ vpc_dict }}
+
+- name: Create internet gateways for cluster VPCs
+  amazon.aws.ec2_vpc_igw:
+    vpc_id: "{{ item.vpc.id }}"
+    region: "{{ aws_region }}"
+    tags:
+      Name: "{{ item.item.name }}-igw"
+      Project: openshift-dual-cluster
+    state: present
+  loop: "{{ cluster_vpcs_result.results }}"
+  register: cluster_igws
+
+- name: Create public subnets for each cluster VPC
+  amazon.aws.ec2_vpc_subnet:
+    vpc_id: "{{ vpc_map[item.0.name] }}"
+    cidr: "{{ item.1.cidr }}"
+    az: "{{ item.1.az }}"
+    region: "{{ aws_region }}"
+    map_public: yes
+    tags:
+      Name: "{{ item.0.name }}-public-{{ item.1.az }}"
+      Project: openshift-dual-cluster
+      Type: public
+      Cluster: "{{ item.0.cluster }}"
+    state: present
+  with_subelements:
+    - "{{ vpcs }}"
+    - public_subnets
+  register: cluster_public_subnets_result
+
+- name: Create private subnets for each cluster VPC
+  amazon.aws.ec2_vpc_subnet:
+    vpc_id: "{{ vpc_map[item.0.name] }}"
+    cidr: "{{ item.1.cidr }}"
+    az: "{{ item.1.az }}"
+    region: "{{ aws_region }}"
+    tags:
+      Name: "{{ item.0.name }}-private-{{ item.1.az }}"
+      Project: openshift-dual-cluster
+      Type: private
+      Cluster: "{{ item.0.cluster }}"
+    state: present
+  with_subelements:
+    - "{{ vpcs }}"
+    - private_subnets
+  register: cluster_private_subnets_result
+
+- name: Group public subnets by VPC
+  set_fact:
+    vpc_public_subnets: |
+      {% set subnets_by_vpc = {} %}
+      {% for result in cluster_public_subnets_result.results %}
+      {% set vpc_name = result.item.0.name %}
+      {% if vpc_name not in subnets_by_vpc %}
+      {% set _ = subnets_by_vpc.update({vpc_name: []}) %}
+      {% endif %}
+      {% set _ = subnets_by_vpc[vpc_name].append(result.subnet.id) %}
+      {% endfor %}
+      {{ subnets_by_vpc }}
+
+- name: Group private subnets by VPC
+  set_fact:
+    vpc_private_subnets: |
+      {% set subnets_by_vpc = {} %}
+      {% for result in cluster_private_subnets_result.results %}
+      {% set vpc_name = result.item.0.name %}
+      {% if vpc_name not in subnets_by_vpc %}
+      {% set _ = subnets_by_vpc.update({vpc_name: []}) %}
+      {% endif %}
+      {% set _ = subnets_by_vpc[vpc_name].append(result.subnet.id) %}
+      {% endfor %}
+      {{ subnets_by_vpc }}
+
+- name: Create NAT gateways for cluster VPCs
+  amazon.aws.ec2_vpc_nat_gateway:
+    subnet_id: "{{ vpc_public_subnets[item.name][0] }}"
+    region: "{{ aws_region }}"
+    wait: yes
+    if_exist_do_not_create: yes
+    tags:
+      Name: "{{ item.name }}-nat"
+      Project: openshift-dual-cluster
+    state: present
+  loop: "{{ vpcs }}"
+  register: cluster_nat_gateways
+
+- name: Create public route tables for cluster VPCs
+  amazon.aws.ec2_vpc_route_table:
+    vpc_id: "{{ vpc_map[item.0.item.name] }}"
+    region: "{{ aws_region }}"
+    tags:
+      Name: "{{ item.0.item.name }}-public-rt"
+      Project: openshift-dual-cluster
+    subnets: "{{ vpc_public_subnets[item.0.item.name] }}"
+    routes:
+      - dest: 0.0.0.0/0
+        gateway_id: "{{ item.1.gateway_id }}"
+    state: present
+  with_together:
+    - "{{ cluster_vpcs_result.results }}"
+    - "{{ cluster_igws.results }}"
+
+- name: Create private route tables for cluster VPCs
+  amazon.aws.ec2_vpc_route_table:
+    vpc_id: "{{ vpc_map[item.0.name] }}"
+    region: "{{ aws_region }}"
+    tags:
+      Name: "{{ item.0.name }}-private-rt"
+      Project: openshift-dual-cluster
+    subnets: "{{ vpc_private_subnets[item.0.name] }}"
+    routes:
+      - dest: 0.0.0.0/0
+        gateway_id: "{{ item.1.nat_gateway_id }}"
+    state: present
+  with_together:
+    - "{{ vpcs }}"
+    - "{{ cluster_nat_gateways.results }}"
+  when: cluster_nat_gateways.results | length > 0
+
+# VPC Peering Configuration
+- name: Create VPC peering connections between all VPCs
+  when: enable_vpc_peering | default(true)
+  block:
+    - name: Create peering connection between bastion and hub VPC
+      amazon.aws.ec2_vpc_peer:
+        region: "{{ aws_region }}"
+        vpc_id: "{{ bastion_vpc_id }}"
+        peer_vpc_id: "{{ vpc_map['hub-cluster-vpc'] }}"
+        tags:
+          Name: "bastion-to-hub-peering"
+          Project: openshift-dual-cluster
+        state: present
+      register: bastion_hub_peering
+
+    - name: Create peering connection between bastion and managed VPC
+      amazon.aws.ec2_vpc_peer:
+        region: "{{ aws_region }}"
+        vpc_id: "{{ bastion_vpc_id }}"
+        peer_vpc_id: "{{ vpc_map['managed-cluster-vpc'] }}"
+        tags:
+          Name: "bastion-to-managed-peering"
+          Project: openshift-dual-cluster
+        state: present
+      register: bastion_managed_peering
+
+    - name: Create peering connection between hub and managed VPCs
+      amazon.aws.ec2_vpc_peer:
+        region: "{{ aws_region }}"
+        vpc_id: "{{ vpc_map['hub-cluster-vpc'] }}"
+        peer_vpc_id: "{{ vpc_map['managed-cluster-vpc'] }}"
+        tags:
+          Name: "hub-to-managed-peering"
+          Project: openshift-dual-cluster
+        state: present
+      register: hub_managed_peering
+
+    - name: Accept VPC peering connections
+      amazon.aws.ec2_vpc_peer:
+        region: "{{ aws_region }}"
+        peering_id: "{{ item.peering_id }}"
+        state: accept
+      loop:
+        - "{{ bastion_hub_peering }}"
+        - "{{ bastion_managed_peering }}"
+        - "{{ hub_managed_peering }}"
+      when: item.peering_id is defined
+
+    - name: Get bastion VPC route tables
+      amazon.aws.ec2_vpc_route_table_info:
+        region: "{{ aws_region }}"
+        filters:
+          vpc-id: "{{ bastion_vpc_id }}"
+      register: bastion_route_tables
+
+    - name: Add routes to bastion VPC for peered VPCs (all route tables)
+      shell: |
+        # Add route to hub VPC
+        aws ec2 create-route \
+          --region {{ aws_region }} \
+          --route-table-id {{ item.id }} \
+          --destination-cidr-block {{ vpcs[0].cidr }} \
+          --vpc-peering-connection-id {{ bastion_hub_peering.peering_id }} 2>/dev/null || echo "Route to hub VPC exists"
+
+        # Add route to managed VPC
+        aws ec2 create-route \
+          --region {{ aws_region }} \
+          --route-table-id {{ item.id }} \
+          --destination-cidr-block {{ vpcs[1].cidr }} \
+          --vpc-peering-connection-id {{ bastion_managed_peering.peering_id }} 2>/dev/null || echo "Route to managed VPC exists"
+      loop: "{{ bastion_route_tables.route_tables }}"
+      register: bastion_peering_routes
+      changed_when: "'CreateRoute' in bastion_peering_routes.stdout"
+
+    - name: Get hub VPC route tables
+      amazon.aws.ec2_vpc_route_table_info:
+        region: "{{ aws_region }}"
+        filters:
+          vpc-id: "{{ vpc_map['hub-cluster-vpc'] }}"
+      register: hub_route_tables
+
+    - name: Add peering routes to hub VPC route tables
+      shell: |
+        # Add route to bastion VPC
+        aws ec2 create-route \
+          --region {{ aws_region }} \
+          --route-table-id {{ item.id }} \
+          --destination-cidr-block {{ bastion_vpc.cidr }} \
+          --vpc-peering-connection-id {{ bastion_hub_peering.peering_id }} 2>/dev/null || echo "Route exists"
+
+        # Add route to managed VPC
+        aws ec2 create-route \
+          --region {{ aws_region }} \
+          --route-table-id {{ item.id }} \
+          --destination-cidr-block {{ vpcs[1].cidr }} \
+          --vpc-peering-connection-id {{ hub_managed_peering.peering_id }} 2>/dev/null || echo "Route exists"
+      loop: "{{ hub_route_tables.route_tables }}"
+      register: hub_peering_routes
+      changed_when: "'CreateRoute' in hub_peering_routes.stdout"
+      failed_when: false
+
+    - name: Get managed VPC route tables
+      amazon.aws.ec2_vpc_route_table_info:
+        region: "{{ aws_region }}"
+        filters:
+          vpc-id: "{{ vpc_map['managed-cluster-vpc'] }}"
+      register: managed_route_tables
+
+    - name: Add peering routes to managed VPC route tables
+      shell: |
+        # Add route to bastion VPC
+        aws ec2 create-route \
+          --region {{ aws_region }} \
+          --route-table-id {{ item.id }} \
+          --destination-cidr-block {{ bastion_vpc.cidr }} \
+          --vpc-peering-connection-id {{ bastion_managed_peering.peering_id }} 2>/dev/null || echo "Route exists"
+
+        # Add route to hub VPC
+        aws ec2 create-route \
+          --region {{ aws_region }} \
+          --route-table-id {{ item.id }} \
+          --destination-cidr-block {{ vpcs[0].cidr }} \
+          --vpc-peering-connection-id {{ hub_managed_peering.peering_id }} 2>/dev/null || echo "Route exists"
+      loop: "{{ managed_route_tables.route_tables }}"
+      register: managed_peering_routes
+      changed_when: "'CreateRoute' in managed_peering_routes.stdout"
+      failed_when: false
+
+- name: Display VPC information
+  debug:
+    msg:
+      - "Bastion VPC ID: {{ bastion_vpc_id }} ({{ bastion_vpc.cidr }})"
+      - "Hub VPC ID: {{ vpc_map['hub-cluster-vpc'] }} ({{ vpcs[0].cidr }})"
+      - "Managed VPC ID: {{ vpc_map['managed-cluster-vpc'] }} ({{ vpcs[1].cidr }})"
+      - "VPC Peering enabled: {{ enable_vpc_peering | default(true) }}"

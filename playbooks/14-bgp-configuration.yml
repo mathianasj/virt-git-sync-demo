@@ -1,0 +1,223 @@
+---
+- name: Gather bastion information
+  hosts: localhost
+  gather_facts: no
+  become: no
+  vars_files:
+    - /tmp/selected-domain.yml
+  tasks:
+    - name: Load global variables
+      include_vars:
+        file: "{{ playbook_dir }}/../group_vars/all.yml"
+
+    - name: Display phase timing information
+      debug:
+        msg:
+          - "=========================================="
+          - "Phase 14: BGP Configuration"
+          - "=========================================="
+          - "Expected Runtime: 5-10 minutes"
+          - "Started: {{ ansible_date_time.time }}"
+          - "Estimated Completion: {{ '%02d:%02d' | format((ansible_date_time.hour | int + ((ansible_date_time.minute | int + 10) // 60)) % 24, (ansible_date_time.minute | int + 10) % 60) }}"
+          - "=========================================="
+
+    - name: Get bastion public IP from AWS
+      shell: |
+        aws ec2 describe-instances \
+          --region {{ aws_region }} \
+          --filters "Name=tag:Role,Values=bastion" "Name=instance-state-name,Values=running" \
+          --query 'Reservations[0].Instances[0].PublicIpAddress' \
+          --output text
+      register: bastion_ip_result
+      changed_when: false
+
+    - name: Add bastion to inventory
+      add_host:
+        name: bastion_host
+        groups: bastion_dynamic
+        ansible_host: "{{ bastion_ip_result.stdout }}"
+        ansible_user: "{{ bastion_user }}"
+        ansible_ssh_private_key_file: "~/.ssh/{{ bastion_key_name }}"
+        ansible_ssh_common_args: "-o StrictHostKeyChecking=no"
+        ansible_python_interpreter: /usr/bin/python3
+
+- name: Phase 14 - BGP Routing Configuration
+  hosts: bastion_dynamic
+  gather_facts: no
+  become: no
+  vars_files:
+    - /tmp/selected-domain.yml
+  pre_tasks:
+    - name: Load global variables
+      include_vars:
+        file: "{{ playbook_dir }}/../group_vars/all.yml"
+
+    - name: Update clusters configuration with selected domain
+      set_fact:
+        clusters: |
+          {% set updated_clusters = [] %}
+          {% for cluster in clusters %}
+          {% set _ = cluster.update({'base_domain': selected_base_domain}) %}
+          {% set _ = updated_clusters.append(cluster) %}
+          {% endfor %}
+          {{ updated_clusters }}
+  vars:
+    hub_cluster: "{{ clusters[0] }}"
+
+  tasks:
+    - name: Display BGP configuration overview
+      debug:
+        msg:
+          - "=========================================="
+          - "BGP Routing Configuration"
+          - "=========================================="
+          - "Enabling FRR routing via CNO on both clusters"
+          - "Establishing BGP peering between:"
+          - "  - OpenShift nodes (FRR-K8s)"
+          - "  - FRRouting EC2 routers"
+          - ""
+          - "Hub Cluster ASN: {{ bgp_asn_hub }}"
+          - "Managed Cluster ASN: {{ bgp_asn_managed }}"
+          - "Router ASN: {{ bgp_router_asn }}"
+          - ""
+          - "No route advertisement configured (peering only)"
+          - "=========================================="
+          - ""
+          - "NOTE: SSH helper pods are no longer required."
+          - "BGP configuration now uses direct SSH via VPC peering."
+
+    - name: Configure BGP routing
+      include_role:
+        name: ovn_bgp
+      vars:
+        hub_kubeconfig: "{{ hub_cluster.install_dir }}/auth/kubeconfig"
+
+  post_tasks:
+    - name: Display BGP deployment summary
+      debug:
+        msg:
+          - "=========================================="
+          - "BGP Routing Configured Successfully"
+          - "=========================================="
+          - "FRR enabled via Cluster Network Operator"
+          - "BGP sessions established on both clusters"
+          - ""
+          - "Next: Updating VPC route tables..."
+
+    - name: Configure routing for hub cluster
+      include_tasks: configure_cluster_routing.yml
+      vars:
+        cluster_config: "{{ clusters[0] }}"
+        router_nat_enabled: false  # NAT already configured in phase 7
+
+    - name: Configure routing for managed cluster
+      include_tasks: configure_cluster_routing.yml
+      vars:
+        cluster_config: "{{ clusters[1] }}"
+        router_nat_enabled: false  # NAT already configured in phase 7
+
+    - name: Wait for BGP sessions to establish
+      pause:
+        seconds: 30
+        prompt: "Waiting 30 seconds for BGP sessions to establish..."
+
+    - name: Validate BGP peering on hub router
+      shell: |
+        ssh -i ~/.ssh/{{ bastion_key_name }} \
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
+            {{ router_user }}@{{ hub_router_ssh_ip }} \
+            'sudo vtysh -c "show ip bgp summary json"'
+      register: hub_bgp_status
+      changed_when: false
+      failed_when: false
+
+    - name: Validate BGP peering on managed router
+      shell: |
+        ssh -i ~/.ssh/{{ bastion_key_name }} \
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
+            {{ router_user }}@{{ managed_router_ssh_ip }} \
+            'sudo vtysh -c "show ip bgp summary json"'
+      register: managed_bgp_status
+      changed_when: false
+      failed_when: false
+
+    - name: Parse BGP validation results
+      set_fact:
+        hub_bgp_json: "{{ hub_bgp_status.stdout | from_json }}"
+        managed_bgp_json: "{{ managed_bgp_status.stdout | from_json }}"
+
+    - name: Check hub BGP sessions are established
+      assert:
+        that:
+          - hub_bgp_json.ipv4Unicast is defined
+          - hub_bgp_json.ipv4Unicast.peers is defined
+          - hub_bgp_json.ipv4Unicast.peers | length >= 2
+          - hub_bgp_json.ipv4Unicast.peers[hub_node_ips.stdout_lines[0]].state is defined
+          - hub_bgp_json.ipv4Unicast.peers[hub_node_ips.stdout_lines[1]].state is defined
+          - "'Established' in hub_bgp_json.ipv4Unicast.peers[hub_node_ips.stdout_lines[0]].state or hub_bgp_json.ipv4Unicast.peers[hub_node_ips.stdout_lines[0]].peerState == 'Established'"
+          - "'Established' in hub_bgp_json.ipv4Unicast.peers[hub_node_ips.stdout_lines[1]].state or hub_bgp_json.ipv4Unicast.peers[hub_node_ips.stdout_lines[1]].peerState == 'Established'"
+        fail_msg: "Hub cluster BGP sessions are not established"
+        success_msg: "Hub cluster BGP sessions are established"
+
+    - name: Check managed BGP sessions are established
+      assert:
+        that:
+          - managed_bgp_json.ipv4Unicast is defined
+          - managed_bgp_json.ipv4Unicast.peers is defined
+          - managed_bgp_json.ipv4Unicast.peers | length >= 2
+          - managed_bgp_json.ipv4Unicast.peers[managed_node_ips.stdout_lines[0]].state is defined
+          - managed_bgp_json.ipv4Unicast.peers[managed_node_ips.stdout_lines[1]].state is defined
+          - "'Established' in managed_bgp_json.ipv4Unicast.peers[managed_node_ips.stdout_lines[0]].state or managed_bgp_json.ipv4Unicast.peers[managed_node_ips.stdout_lines[0]].peerState == 'Established'"
+          - "'Established' in managed_bgp_json.ipv4Unicast.peers[managed_node_ips.stdout_lines[1]].state or managed_bgp_json.ipv4Unicast.peers[managed_node_ips.stdout_lines[1]].peerState == 'Established'"
+        fail_msg: "Managed cluster BGP sessions are not established"
+        success_msg: "Managed cluster BGP sessions are established"
+
+    - name: Display BGP peering validation results
+      debug:
+        msg:
+          - "=========================================="
+          - "BGP Peering Validation"
+          - "=========================================="
+          - ""
+          - "Hub Cluster:"
+          - "  Total BGP Neighbors: {{ hub_bgp_json.ipv4Unicast.peers | length }}"
+          - "  Established Sessions: {{ hub_bgp_json.ipv4Unicast.peers | dict2items | selectattr('value.peerState', 'defined') | selectattr('value.peerState', 'equalto', 'Established') | list | length }}"
+          - "  Neighbor 1 ({{ hub_node_ips.stdout_lines[0] }}): {{ hub_bgp_json.ipv4Unicast.peers[hub_node_ips.stdout_lines[0]].peerState | default('Unknown') }}"
+          - "  Neighbor 2 ({{ hub_node_ips.stdout_lines[1] }}): {{ hub_bgp_json.ipv4Unicast.peers[hub_node_ips.stdout_lines[1]].peerState | default('Unknown') }}"
+          - ""
+          - "Managed Cluster:"
+          - "  Total BGP Neighbors: {{ managed_bgp_json.ipv4Unicast.peers | length }}"
+          - "  Established Sessions: {{ managed_bgp_json.ipv4Unicast.peers | dict2items | selectattr('value.peerState', 'defined') | selectattr('value.peerState', 'equalto', 'Established') | list | length }}"
+          - "  Neighbor 1 ({{ managed_node_ips.stdout_lines[0] }}): {{ managed_bgp_json.ipv4Unicast.peers[managed_node_ips.stdout_lines[0]].peerState | default('Unknown') }}"
+          - "  Neighbor 2 ({{ managed_node_ips.stdout_lines[1] }}): {{ managed_bgp_json.ipv4Unicast.peers[managed_node_ips.stdout_lines[1]].peerState | default('Unknown') }}"
+          - ""
+          - "✅ All BGP sessions validated successfully"
+          - "=========================================="
+
+    - name: Display final summary
+      debug:
+        msg:
+          - "=========================================="
+          - "BGP Configuration Complete"
+          - "=========================================="
+          - "✓ FRR enabled via Cluster Network Operator"
+          - "✓ BGP sessions established on both clusters"
+          - "✓ VPC route tables updated to use BGP routers"
+          - ""
+          - "Verification:"
+          - "  1. Check FRR pods:"
+          - "     oc get pods -n openshift-frr-k8s"
+          - ""
+          - "  2. Check FRRConfiguration:"
+          - "     oc get frrconfiguration -n openshift-frr-k8s"
+          - ""
+          - "  3. View BGP summary on routers:"
+          - "     ssh to router, then: sudo vtysh -c 'show ip bgp summary'"
+          - ""
+          - "  4. Test worker node internet connectivity:"
+          - "     oc debug node/<worker> -- chroot /host ping -c 3 8.8.8.8"
+          - ""
+          - "Route backups saved to /tmp/route-backups/ on bastion"
+          - "=========================================="

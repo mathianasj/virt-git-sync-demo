@@ -1,5 +1,9 @@
 replicaCount: 1
 
+serviceAccount:
+  create: false
+  name: gitea
+
 image:
   repository: gitea/gitea
   tag: "1.21"
@@ -42,5 +46,11 @@ gitea:
 postgresql:
   enabled: false
 
+postgresql-ha:
+  enabled: false
+
 redis:
+  enabled: false
+
+redis-cluster:
   enabled: false

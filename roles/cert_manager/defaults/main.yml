@@ -1,0 +1,5 @@
+---
+certmanager_namespace: cert-manager
+certmanager_operator_channel: stable-v1
+certmanager_operator_source: redhat-operators
+letsencrypt_email: admin@{{ cluster_config.base_domain }}

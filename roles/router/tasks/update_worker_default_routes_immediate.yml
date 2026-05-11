@@ -1,0 +1,87 @@
+---
+# Immediately update worker node default routes to point to BGP router
+# This avoids node reboots but changes are not persistent across reboots
+
+- name: Get hub cluster c5.metal worker nodes
+  shell: |
+    aws ec2 describe-instances \
+      --region {{ aws_region }} \
+      --filters "Name=instance-type,Values=c5.metal" \
+                "Name=instance-state-name,Values=running" \
+                "Name=tag:Name,Values=*hub*worker*" \
+      --query 'Reservations[*].Instances[*].PrivateIpAddress' \
+      --output text
+  register: hub_worker_ips
+  changed_when: false
+
+- name: Update default route on each hub worker node
+  shell: |
+    ssh -o StrictHostKeyChecking=no -i ~/.ssh/{{ router_key_name }} \
+      core@{{ item }} \
+      'sudo ip route del default via 10.0.11.1 dev br-ex 2>/dev/null || true; \
+       sudo ip route add default via {{ hub_router_instance.instances[0].private_ip_address }} dev br-ex metric 100'
+  loop: "{{ hub_worker_ips.stdout.split() }}"
+  when:
+    - hub_worker_ips.stdout | length > 0
+    - hub_router_instance is defined
+  delegate_to: "{{ bastion_public_ip }}"
+  become: true
+  become_user: ec2-user
+
+- name: Verify new default route on hub workers
+  shell: |
+    ssh -o StrictHostKeyChecking=no -i ~/.ssh/{{ router_key_name }} \
+      core@{{ item }} 'ip route show default'
+  loop: "{{ hub_worker_ips.stdout.split() }}"
+  when: hub_worker_ips.stdout | length > 0
+  delegate_to: "{{ bastion_public_ip }}"
+  become: true
+  become_user: ec2-user
+  register: hub_routes
+
+- name: Display hub worker routes
+  debug:
+    msg: "{{ hub_routes.results | map(attribute='stdout') | list }}"
+  when: hub_routes is defined
+
+- name: Get managed cluster c5.metal worker nodes
+  shell: |
+    aws ec2 describe-instances \
+      --region {{ aws_region }} \
+      --filters "Name=instance-type,Values=c5.metal" \
+                "Name=instance-state-name,Values=running" \
+                "Name=tag:Name,Values=*managed*worker*" \
+      --query 'Reservations[*].Instances[*].PrivateIpAddress' \
+      --output text
+  register: managed_worker_ips
+  changed_when: false
+
+- name: Update default route on each managed worker node
+  shell: |
+    ssh -o StrictHostKeyChecking=no -i ~/.ssh/{{ router_key_name }} \
+      core@{{ item }} \
+      'sudo ip route del default via 10.1.11.1 dev br-ex 2>/dev/null || true; \
+       sudo ip route add default via {{ managed_router_instance.instances[0].private_ip_address }} dev br-ex metric 100'
+  loop: "{{ managed_worker_ips.stdout.split() }}"
+  when:
+    - managed_worker_ips.stdout | length > 0
+    - managed_router_instance is defined
+  delegate_to: "{{ bastion_public_ip }}"
+  become: true
+  become_user: ec2-user
+
+- name: Verify new default route on managed workers
+  shell: |
+    ssh -o StrictHostKeyChecking=no -i ~/.ssh/{{ router_key_name }} \
+      core@{{ item }} 'ip route show default'
+  loop: "{{ managed_worker_ips.stdout.split() }}"
+  when: managed_worker_ips.stdout | length > 0
+  delegate_to: "{{ bastion_public_ip }}"
+  become: true
+  become_user: ec2-user
+  register: managed_routes
+
+- name: Display managed worker routes
+  debug:
+    msg: "{{ managed_routes.results | map(attribute='stdout') | list }}"
+  when: managed_routes is defined

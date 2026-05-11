@@ -1,0 +1,170 @@
+---
+- name: Gather bastion information
+  hosts: localhost
+  gather_facts: no
+  become: no
+  vars_files:
+    - /tmp/selected-domain.yml
+  tasks:
+    - name: Load global variables
+      include_vars:
+        file: "{{ playbook_dir }}/../group_vars/all.yml"
+
+    - name: Display phase timing information
+      debug:
+        msg:
+          - "=========================================="
+          - "Phase 11: Cert Manager Setup"
+          - "=========================================="
+          - "Expected Runtime: 3-5 minutes"
+          - "Started: {{ ansible_date_time.time }}"
+          - "Estimated Completion: {{ '%02d:%02d' | format((ansible_date_time.hour | int + ((ansible_date_time.minute | int + 5) // 60)) % 24, (ansible_date_time.minute | int + 5) % 60) }}"
+          - "=========================================="
+
+    - name: Get bastion public IP from AWS
+      shell: |
+        aws ec2 describe-instances \
+          --region {{ aws_region }} \
+          --filters "Name=tag:Role,Values=bastion" "Name=instance-state-name,Values=running" \
+          --query 'Reservations[0].Instances[0].PublicIpAddress' \
+          --output text
+      register: bastion_ip_result
+      changed_when: false
+
+    - name: Add bastion to inventory
+      add_host:
+        name: bastion_host
+        groups: bastion_dynamic
+        ansible_host: "{{ bastion_ip_result.stdout }}"
+        ansible_user: "{{ bastion_user }}"
+        ansible_ssh_private_key_file: "~/.ssh/{{ bastion_key_name }}"
+        ansible_ssh_common_args: "-o StrictHostKeyChecking=no"
+        ansible_python_interpreter: /usr/bin/python3
+
+- name: Phase 10 - cert-manager Setup with Route53
+  hosts: bastion_dynamic
+  gather_facts: yes
+  become: no
+  vars_files:
+    - /tmp/selected-domain.yml
+  pre_tasks:
+    - name: Load global variables
+      include_vars:
+        file: "{{ playbook_dir }}/../group_vars/all.yml"
+
+    - name: Update clusters configuration with selected domain
+      set_fact:
+        clusters: |
+          {% set updated_clusters = [] %}
+          {% for cluster in clusters %}
+          {% set _ = cluster.update({'base_domain': selected_base_domain}) %}
+          {% set _ = updated_clusters.append(cluster) %}
+          {% endfor %}
+          {{ updated_clusters }}
+
+  tasks:
+    - name: Display cert-manager setup overview
+      debug:
+        msg:
+          - "=========================================="
+          - "cert-manager Setup with Route53"
+          - "=========================================="
+          - "Installing cert-manager on both clusters:"
+          - "  Hub: {{ clusters[0].cluster_name }}.{{ selected_base_domain }}"
+          - "  Managed: {{ clusters[1].cluster_name }}.{{ selected_base_domain }}"
+          - ""
+          - "This will:"
+          - "  1. Create IAM user with Route53 permissions"
+          - "  2. Install cert-manager operator"
+          - "  3. Configure Let's Encrypt ClusterIssuer"
+          - "  4. Generate wildcard certificates"
+          - "  5. Update IngressController"
+          - "=========================================="
+
+- name: Setup cert-manager on hub cluster
+  hosts: bastion_dynamic
+  gather_facts: no
+  become: no
+  vars_files:
+    - /tmp/selected-domain.yml
+  pre_tasks:
+    - name: Load global variables
+      include_vars:
+        file: "{{ playbook_dir }}/../group_vars/all.yml"
+
+    - name: Set cluster configuration for hub
+      set_fact:
+        cluster_config: "{{ clusters[0] | combine({'base_domain': selected_base_domain}) }}"
+        kubeconfig_path: "{{ clusters[0].install_dir }}/auth/kubeconfig"
+
+  roles:
+    - cert_manager
+
+- name: Setup cert-manager on managed cluster
+  hosts: bastion_dynamic
+  gather_facts: no
+  become: no
+  vars_files:
+    - /tmp/selected-domain.yml
+  pre_tasks:
+    - name: Load global variables
+      include_vars:
+        file: "{{ playbook_dir }}/../group_vars/all.yml"
+
+    - name: Set cluster configuration for managed
+      set_fact:
+        cluster_config: "{{ clusters[1] | combine({'base_domain': selected_base_domain}) }}"
+        kubeconfig_path: "{{ clusters[1].install_dir }}/auth/kubeconfig"
+
+  roles:
+    - cert_manager
+
+- name: cert-manager Setup Complete
+  hosts: bastion_dynamic
+  gather_facts: no
+  become: no
+  vars_files:
+    - /tmp/selected-domain.yml
+  pre_tasks:
+    - name: Load global variables
+      include_vars:
+        file: "{{ playbook_dir }}/../group_vars/all.yml"
+
+    - name: Update clusters configuration
+      set_fact:
+        clusters: |
+          {% set updated_clusters = [] %}
+          {% for cluster in clusters %}
+          {% set _ = cluster.update({'base_domain': selected_base_domain}) %}
+          {% set _ = updated_clusters.append(cluster) %}
+          {% endfor %}
+          {{ updated_clusters }}
+
+  tasks:
+    - name: Display verification instructions
+      debug:
+        msg:
+          - "=========================================="
+          - "cert-manager Setup Complete!"
+          - "=========================================="
+          - ""
+          - "Verification steps:"
+          - ""
+          - "1. Check ClusterIssuer:"
+          - "   oc get clusterissuer letsencrypt-prod"
+          - ""
+          - "2. Check Certificate:"
+          - "   oc get certificate -n openshift-ingress"
+          - ""
+          - "3. Verify certificate details:"
+          - "   oc describe certificate wildcard-apps-cert -n openshift-ingress"
+          - ""
+          - "4. Test with curl (wait 5-10 min for DNS propagation):"
+          - "   curl -v https://console-openshift-console.apps.{{ clusters[0].cluster_name }}.{{ selected_base_domain }}"
+          - ""
+          - "5. Check certificate issuer in browser:"
+          - "   https://console-openshift-console.apps.{{ clusters[0].cluster_name }}.{{ selected_base_domain }}"
+          - "   Should show: Let's Encrypt"
+          - ""
+          - "Auto-renewal: Certificate will renew 30 days before expiry (every 60 days)"
+          - "=========================================="

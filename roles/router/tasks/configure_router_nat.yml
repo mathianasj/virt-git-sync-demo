@@ -1,0 +1,166 @@
+---
+# Configure routers to act as NAT gateways for internet access
+# This adds a second ENI in the public subnet, configures routing, and updates VPC route tables
+
+# Get hub cluster public subnet ID (in us-east-1a)
+- name: Get hub cluster public subnet
+  shell: |
+    aws ec2 describe-subnets \
+      --region {{ aws_region }} \
+      --filters "Name=vpc-id,Values={{ hub_vpc_id }}" \
+                "Name=availability-zone,Values={{ router_availability_zone }}" \
+                "Name=tag:Name,Values=*public*" \
+      --query 'Subnets[0].SubnetId' \
+      --output text
+  register: hub_public_subnet_result
+  changed_when: false
+
+# Get managed cluster public subnet ID (in us-east-1a)
+- name: Get managed cluster public subnet
+  shell: |
+    aws ec2 describe-subnets \
+      --region {{ aws_region }} \
+      --filters "Name=vpc-id,Values={{ managed_vpc_id }}" \
+                "Name=availability-zone,Values={{ router_availability_zone }}" \
+                "Name=tag:Name,Values=*public*" \
+      --query 'Subnets[0].SubnetId' \
+      --output text
+  register: managed_public_subnet_result
+  changed_when: false
+
+# Get NAT gateway private IPs for each VPC
+- name: Get hub NAT gateway private IP
+  shell: |
+    aws ec2 describe-nat-gateways \
+      --region {{ aws_region }} \
+      --filter "Name=vpc-id,Values={{ hub_vpc_id }}" \
+               "Name=state,Values=available" \
+      --query 'NatGateways[0].NatGatewayAddresses[0].PrivateIp' \
+      --output text
+  register: hub_nat_ip_result
+  changed_when: false
+
+- name: Get managed NAT gateway private IP
+  shell: |
+    aws ec2 describe-nat-gateways \
+      --region {{ aws_region }} \
+      --filter "Name=vpc-id,Values={{ managed_vpc_id }}" \
+               "Name=state,Values=available" \
+      --query 'NatGateways[0].NatGatewayAddresses[0].PrivateIp' \
+      --output text
+  register: managed_nat_ip_result
+  changed_when: false
+
+- name: Set NAT gateway facts
+  set_fact:
+    hub_public_subnet_id: "{{ hub_public_subnet_result.stdout }}"
+    managed_public_subnet_id: "{{ managed_public_subnet_result.stdout }}"
+    hub_nat_gateway_ip: "{{ hub_nat_ip_result.stdout }}"
+    managed_nat_gateway_ip: "{{ managed_nat_ip_result.stdout }}"
+
+- name: Display NAT configuration
+  debug:
+    msg:
+      - "NAT Configuration for Routers"
+      - "Hub NAT Gateway IP: {{ hub_nat_gateway_ip }}"
+      - "Managed NAT Gateway IP: {{ managed_nat_gateway_ip }}"
+      - "Hub Public Subnet: {{ hub_public_subnet_id }}"
+      - "Managed Public Subnet: {{ managed_public_subnet_id }}"
+
+# Create and attach second ENI for hub router
+- name: Check if hub router already has second ENI
+  shell: |
+    aws ec2 describe-instances \
+      --region {{ aws_region }} \
+      --instance-ids {{ router_hub_instance.stdout }} \
+      --query 'Reservations[0].Instances[0].NetworkInterfaces | length(@)' \
+      --output text
+  register: hub_eni_count
+  changed_when: false
+
+- name: Create second ENI for hub router in public subnet
+  shell: |
+    ENI_ID=$(aws ec2 create-network-interface \
+      --region {{ aws_region }} \
+      --subnet-id {{ hub_public_subnet_id }} \
+      --description "Hub router public subnet ENI for NAT gateway access" \
+      --groups {{ hub_router_sg.stdout }} \
+      --query 'NetworkInterface.NetworkInterfaceId' \
+      --output text)
+
+    # Disable source/dest check on the ENI
+    aws ec2 modify-network-interface-attribute \
+      --region {{ aws_region }} \
+      --network-interface-id $ENI_ID \
+      --no-source-dest-check
+
+    echo $ENI_ID
+  register: hub_second_eni
+  when: hub_eni_count.stdout | int < 2
+  changed_when: hub_second_eni.stdout | length > 0
+
+- name: Attach second ENI to hub router
+  shell: |
+    aws ec2 attach-network-interface \
+      --region {{ aws_region }} \
+      --network-interface-id {{ hub_second_eni.stdout | trim }} \
+      --instance-id {{ router_hub_instance.stdout | trim }} \
+      --device-index 1
+  when: hub_eni_count.stdout | int < 2
+
+# Create and attach second ENI for managed router
+- name: Check if managed router already has second ENI
+  shell: |
+    aws ec2 describe-instances \
+      --region {{ aws_region }} \
+      --instance-ids {{ router_managed_instance.stdout }} \
+      --query 'Reservations[0].Instances[0].NetworkInterfaces | length(@)' \
+      --output text
+  register: managed_eni_count
+  changed_when: false
+
+- name: Create second ENI for managed router in public subnet
+  shell: |
+    ENI_ID=$(aws ec2 create-network-interface \
+      --region {{ aws_region }} \
+      --subnet-id {{ managed_public_subnet_id }} \
+      --description "Managed router public subnet ENI for NAT gateway access" \
+      --groups {{ managed_router_sg.stdout }} \
+      --query 'NetworkInterface.NetworkInterfaceId' \
+      --output text)
+
+    # Disable source/dest check on the ENI
+    aws ec2 modify-network-interface-attribute \
+      --region {{ aws_region }} \
+      --network-interface-id $ENI_ID \
+      --no-source-dest-check
+
+    echo $ENI_ID
+  register: managed_second_eni
+  when: managed_eni_count.stdout | int < 2
+  changed_when: managed_second_eni.stdout | length > 0
+
+- name: Attach second ENI to managed router
+  shell: |
+    aws ec2 attach-network-interface \
+      --region {{ aws_region }} \
+      --network-interface-id {{ managed_second_eni.stdout | trim }} \
+      --instance-id {{ router_managed_instance.stdout | trim }} \
+      --device-index 1
+  when: managed_eni_count.stdout | int < 2
+
+# Wait for ENIs to be attached and network to be ready
+- name: Wait for ENIs to be fully attached
+  pause:
+    seconds: 10
+  when: (hub_eni_count.stdout | int < 2) or (managed_eni_count.stdout | int < 2)
+
+# Configure routing and NAT on routers
+- name: Configure NAT on both routers
+  include_tasks: configure_nat.yml
+
+# Update VPC route tables with split routing
+# Worker subnets (same AZ as router) -> BGP router
+# Control plane subnets (other AZs) -> NAT Gateway
+- name: Update VPC route tables with split routing
+  include_tasks: update_vpc_route_tables_split.yml

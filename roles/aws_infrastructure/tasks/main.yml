@@ -1,9 +1,9 @@
 ---
-- name: Include VPC tasks
-  include_tasks: vpc.yml
+- name: Include VPC tasks (multi-VPC with peering)
+  include_tasks: vpc_multi.yml
 
-- name: Include security groups tasks
-  include_tasks: security_groups.yml
+- name: Include security groups tasks (multi-VPC)
+  include_tasks: security_groups_multi.yml
 
 - name: Include IAM tasks
   include_tasks: iam.yml
@@ -15,14 +15,17 @@
   copy:
     content: |
       {
-        "vpc_id": "{{ vpc_id }}",
-        "public_subnet_ids": {{ public_subnet_ids | to_json }},
-        "private_subnet_ids": {{ private_subnet_ids | to_json }},
+        "bastion_vpc_id": "{{ bastion_vpc_id }}",
+        "bastion_public_subnet_id": "{{ bastion_public_subnet_id }}",
+        "vpc_map": {{ vpc_map | to_json }},
+        "vpc_public_subnets": {{ vpc_public_subnets | to_json }},
+        "vpc_private_subnets": {{ vpc_private_subnets | to_json }},
         "bastion_instance_id": "{{ bastion_instance.instances[0].instance_id }}",
         "bastion_public_ip": "{{ bastion_public_ip }}",
         "security_group_ids": {
           "bastion": "{{ bastion_sg_id }}",
-          "cluster": "{{ cluster_sg_id }}"
+          "hub_cluster": "{{ hub_cluster_sg_id }}",
+          "managed_cluster": "{{ managed_cluster_sg_id }}"
         }
       }
     dest: /tmp/aws-infrastructure-state.json

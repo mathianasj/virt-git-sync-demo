@@ -1,0 +1,174 @@
+---
+- name: Create virt-git-sync operator policy
+  kubernetes.core.k8s:
+    kubeconfig: "{{ hub_kubeconfig }}"
+    state: present
+    definition:
+      apiVersion: policy.open-cluster-management.io/v1
+      kind: Policy
+      metadata:
+        name: policy-virt-git-sync
+        namespace: "{{ virtgitsync_policy_namespace }}"
+        annotations:
+          policy.open-cluster-management.io/standards: NIST-CSF
+          policy.open-cluster-management.io/categories: CM Configuration Management
+          policy.open-cluster-management.io/controls: CM-2 Baseline Configuration
+      spec:
+        remediationAction: enforce
+        disabled: false
+        policy-templates:
+          - objectDefinition:
+              apiVersion: policy.open-cluster-management.io/v1
+              kind: ConfigurationPolicy
+              metadata:
+                name: policy-virt-git-sync-namespace
+              spec:
+                remediationAction: enforce
+                severity: high
+                object-templates:
+                  - complianceType: musthave
+                    objectDefinition:
+                      apiVersion: v1
+                      kind: Namespace
+                      metadata:
+                        name: "{{ virtgitsync_namespace }}"
+          - objectDefinition:
+              apiVersion: policy.open-cluster-management.io/v1
+              kind: ConfigurationPolicy
+              metadata:
+                name: policy-virt-git-sync-operatorgroup
+              spec:
+                remediationAction: enforce
+                severity: high
+                object-templates:
+                  - complianceType: musthave
+                    objectDefinition:
+                      apiVersion: operators.coreos.com/v1
+                      kind: OperatorGroup
+                      metadata:
+                        name: virt-git-sync-operator-group
+                        namespace: "{{ virtgitsync_namespace }}"
+                      spec:
+                        targetNamespaces:
+                          - "{{ virtgitsync_namespace }}"
+          - objectDefinition:
+              apiVersion: policy.open-cluster-management.io/v1
+              kind: ConfigurationPolicy
+              metadata:
+                name: policy-virt-git-sync-subscription
+              spec:
+                remediationAction: enforce
+                severity: high
+                object-templates:
+                  - complianceType: musthave
+                    objectDefinition:
+                      apiVersion: operators.coreos.com/v1alpha1
+                      kind: Subscription
+                      metadata:
+                        name: "{{ virtgitsync_operator_name }}"
+                        namespace: "{{ virtgitsync_namespace }}"
+                      spec:
+                        source: "{{ virtgitsync_operator_source }}"
+                        sourceNamespace: openshift-marketplace
+                        name: "{{ virtgitsync_operator_name }}"
+                        channel: "{{ virtgitsync_operator_channel }}"
+                        installPlanApproval: Automatic
+          - objectDefinition:
+              apiVersion: policy.open-cluster-management.io/v1
+              kind: ConfigurationPolicy
+              metadata:
+                name: policy-virt-git-sync-gitea-secret
+              spec:
+                remediationAction: enforce
+                severity: high
+                object-templates:
+                  - complianceType: musthave
+                    objectDefinition:
+                      apiVersion: v1
+                      kind: Secret
+                      metadata:
+                        name: gitea-credentials
+                        namespace: "{{ virtgitsync_namespace }}"
+                      type: Opaque
+                      stringData:
+                        url: "https://gitea-{{ gitea_namespace }}.apps.hub.{{ selected_base_domain }}"
+                        username: "{{ gitea_admin_user }}"
+                        password: "{{ gitea_admin_password }}"
+          - objectDefinition:
+              apiVersion: policy.open-cluster-management.io/v1
+              kind: ConfigurationPolicy
+              metadata:
+                name: policy-virt-git-sync-cr
+              spec:
+                remediationAction: enforce
+                severity: high
+                object-templates:
+                  - complianceType: musthave
+                    objectDefinition:
+                      apiVersion: virt.mathianasj.github.com/v1alpha1
+                      kind: VirtGitSync
+                      metadata:
+                        name: vm-git-sync
+                        namespace: "{{ virtgitsync_namespace }}"
+                      spec:
+                        gitRepository:
+                          url: "https://gitea-{{ gitea_namespace }}.apps.hub.{{ selected_base_domain }}/{{ gitea_admin_user }}/vms.git"
+                          branch: main
+                          secretRef:
+                            name: gitea-credentials
+                        syncPath: vms
+
+- name: Create PlacementRule for all clusters
+  kubernetes.core.k8s:
+    kubeconfig: "{{ hub_kubeconfig }}"
+    state: present
+    definition:
+      apiVersion: apps.open-cluster-management.io/v1
+      kind: PlacementRule
+      metadata:
+        name: placement-virt-git-sync
+        namespace: "{{ virtgitsync_policy_namespace }}"
+      spec:
+        clusterSelector:
+          matchExpressions:
+            - key: vendor
+              operator: In
+              values:
+                - OpenShift
+
+- name: Create PlacementBinding
+  kubernetes.core.k8s:
+    kubeconfig: "{{ hub_kubeconfig }}"
+    state: present
+    definition:
+      apiVersion: policy.open-cluster-management.io/v1
+      kind: PlacementBinding
+      metadata:
+        name: binding-virt-git-sync
+        namespace: "{{ virtgitsync_policy_namespace }}"
+      placementRef:
+        name: placement-virt-git-sync
+        kind: PlacementRule
+        apiGroup: apps.open-cluster-management.io
+      subjects:
+        - name: policy-virt-git-sync
+          kind: Policy
+          apiGroup: policy.open-cluster-management.io
+
+- name: Wait for policy compliance on both clusters
+  shell: |
+    oc get policy policy-virt-git-sync -n {{ virtgitsync_policy_namespace }} -o json | \
+    jq -r '.status.status[] | select(.compliant=="Compliant") | .clustername' | wc -l
+  environment: "{{ kubeconfig_env }}"
+  register: compliant_clusters
+  until: compliant_clusters.stdout | int >= 2
+  retries: "{{ operator_timeout_minutes | int }}"
+  delay: 60
+  changed_when: false
+
+- name: Display policy compliance status
+  debug:
+    msg:
+      - "virt-git-sync policy compliance achieved"
+      - "Compliant clusters: {{ compliant_clusters.stdout }}"
+      - "Operator installed in namespace: {{ virtgitsync_namespace }}"

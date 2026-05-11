@@ -1,0 +1,491 @@
+---
+- name: Get hub cluster VPC from existing worker nodes
+  shell: |
+    aws ec2 describe-instances \
+      --region {{ aws_region }} \
+      --filters "Name=instance-state-name,Values=running" \
+                "Name=tag:Name,Values=*hub*worker*" \
+      --query 'Reservations[0].Instances[0].VpcId' \
+      --output text
+  register: hub_vpc_result
+  changed_when: false
+
+- name: Get hub cluster worker subnet in target AZ
+  shell: |
+    aws ec2 describe-instances \
+      --region {{ aws_region }} \
+      --filters "Name=instance-state-name,Values=running" \
+                "Name=tag:Name,Values=*hub*worker*" \
+                "Name=availability-zone,Values={{ router_availability_zone }}" \
+      --query 'Reservations[0].Instances[0].SubnetId' \
+      --output text
+  register: hub_subnet_result
+  changed_when: false
+
+- name: Get managed cluster VPC from existing worker nodes
+  shell: |
+    aws ec2 describe-instances \
+      --region {{ aws_region }} \
+      --filters "Name=instance-state-name,Values=running" \
+                "Name=tag:Name,Values=*managed*worker*" \
+      --query 'Reservations[0].Instances[0].VpcId' \
+      --output text
+  register: managed_vpc_result
+  changed_when: false
+
+- name: Get managed cluster worker subnet in target AZ
+  shell: |
+    aws ec2 describe-instances \
+      --region {{ aws_region }} \
+      --filters "Name=instance-state-name,Values=running" \
+                "Name=tag:Name,Values=*managed*worker*" \
+                "Name=availability-zone,Values={{ router_availability_zone }}" \
+      --query 'Reservations[0].Instances[0].SubnetId' \
+      --output text
+  register: managed_subnet_result
+  changed_when: false
+
+- name: Parse network configuration
+  set_fact:
+    hub_vpc_id: "{{ hub_vpc_result.stdout }}"
+    hub_subnet_id: "{{ hub_subnet_result.stdout }}"
+    managed_vpc_id: "{{ managed_vpc_result.stdout }}"
+    managed_subnet_id: "{{ managed_subnet_result.stdout }}"
+
+- name: Find Amazon Linux 2023 AMI
+  shell: |
+    aws ec2 describe-images \
+      --region {{ aws_region }} \
+      --owners amazon \
+      --filters "Name=name,Values=al2023-ami-2023.*-x86_64" \
+                "Name=state,Values=available" \
+      --query 'sort_by(Images, &CreationDate)[-1].ImageId' \
+      --output text
+  register: router_ami_result
+  changed_when: false
+
+- name: Create temporary user data script file
+  copy:
+    dest: /tmp/router-userdata.sh
+    mode: '0755'
+    content: |
+      #!/bin/bash
+      set -x
+      exec > >(tee /var/log/user-data.log)
+      exec 2>&1
+
+      # Update system
+      dnf update -y
+
+      # Enable IP forwarding
+      echo "net.ipv4.ip_forward = 1" >> /etc/sysctl.conf
+      echo "net.ipv6.conf.all.forwarding = 1" >> /etc/sysctl.conf
+      sysctl -p
+
+      # Enable SPAL repository and install FRR
+      dnf install -y spal-release
+      dnf install -y frr
+
+      # Enable and configure FRR daemons
+      sed -i 's/^bgpd=no/bgpd=yes/' /etc/frr/daemons
+      sed -i 's/^ospfd=no/ospfd=yes/' /etc/frr/daemons
+      sed -i 's/^zebra=no/zebra=yes/' /etc/frr/daemons
+
+      # Start FRR
+      systemctl enable frr
+      systemctl start frr
+
+      # Verify installation
+      echo "FRRouting installed: $(date)" > /var/log/frr-install.log
+      systemctl status frr >> /var/log/frr-install.log 2>&1
+
+      echo "User-data script complete: $(date)"
+  delegate_to: localhost
+
+- name: Create or get security group for hub router
+  shell: |
+    # Check if security group exists
+    SG_ID=$(aws ec2 describe-security-groups \
+      --region {{ aws_region }} \
+      --filters "Name=vpc-id,Values={{ hub_vpc_id }}" \
+                "Name=group-name,Values=frr-router-hub-sg" \
+      --query 'SecurityGroups[0].GroupId' \
+      --output text 2>/dev/null)
+
+    if [ "$SG_ID" == "None" ] || [ -z "$SG_ID" ]; then
+      # Create security group
+      SG_ID=$(aws ec2 create-security-group \
+        --region {{ aws_region }} \
+        --group-name frr-router-hub-sg \
+        --description "Security group for hub FRRouting router" \
+        --vpc-id {{ hub_vpc_id }} \
+        --query 'GroupId' \
+        --output text)
+
+      # Allow SSH from bastion VPC (explicit rule for auditing)
+      aws ec2 authorize-security-group-ingress \
+        --region {{ aws_region }} \
+        --group-id $SG_ID \
+        --protocol tcp \
+        --port 22 \
+        --cidr {{ bastion_vpc.cidr }} >/dev/null 2>&1 || true
+
+      # Allow SSH from anywhere (for emergency access)
+      aws ec2 authorize-security-group-ingress \
+        --region {{ aws_region }} \
+        --group-id $SG_ID \
+        --protocol tcp \
+        --port 22 \
+        --cidr 0.0.0.0/0 >/dev/null 2>&1 || true
+
+      # Allow all traffic within hub VPC (10.0.0.0/16)
+      aws ec2 authorize-security-group-ingress \
+        --region {{ aws_region }} \
+        --group-id $SG_ID \
+        --protocol -1 \
+        --cidr 10.0.0.0/16 >/dev/null 2>&1 || true
+
+      # Allow all traffic from bastion VPC
+      aws ec2 authorize-security-group-ingress \
+        --region {{ aws_region }} \
+        --group-id $SG_ID \
+        --protocol -1 \
+        --cidr {{ bastion_vpc.cidr }} >/dev/null 2>&1 || true
+
+      # Allow all traffic from VM network (CUDN)
+      aws ec2 authorize-security-group-ingress \
+        --region {{ aws_region }} \
+        --group-id $SG_ID \
+        --protocol -1 \
+        --cidr 192.168.100.0/24 >/dev/null 2>&1 || true
+    else
+      # Security group exists - ensure it has the required rule for hub VPC
+      aws ec2 authorize-security-group-ingress \
+        --region {{ aws_region }} \
+        --group-id $SG_ID \
+        --protocol -1 \
+        --cidr 10.0.0.0/16 2>/dev/null || true
+    fi
+
+    echo $SG_ID
+  register: hub_router_sg
+  changed_when: false
+
+- name: Create or get security group for managed router
+  shell: |
+    # Check if security group exists
+    SG_ID=$(aws ec2 describe-security-groups \
+      --region {{ aws_region }} \
+      --filters "Name=vpc-id,Values={{ managed_vpc_id }}" \
+                "Name=group-name,Values=frr-router-managed-sg" \
+      --query 'SecurityGroups[0].GroupId' \
+      --output text 2>/dev/null)
+
+    if [ "$SG_ID" == "None" ] || [ -z "$SG_ID" ]; then
+      # Create security group
+      SG_ID=$(aws ec2 create-security-group \
+        --region {{ aws_region }} \
+        --group-name frr-router-managed-sg \
+        --description "Security group for managed FRRouting router" \
+        --vpc-id {{ managed_vpc_id }} \
+        --query 'GroupId' \
+        --output text)
+
+      # Allow SSH from bastion VPC (explicit rule for auditing)
+      aws ec2 authorize-security-group-ingress \
+        --region {{ aws_region }} \
+        --group-id $SG_ID \
+        --protocol tcp \
+        --port 22 \
+        --cidr {{ bastion_vpc.cidr }} >/dev/null 2>&1 || true
+
+      # Allow SSH from anywhere (for emergency access)
+      aws ec2 authorize-security-group-ingress \
+        --region {{ aws_region }} \
+        --group-id $SG_ID \
+        --protocol tcp \
+        --port 22 \
+        --cidr 0.0.0.0/0 >/dev/null 2>&1 || true
+
+      # Allow all traffic within managed VPC (10.1.0.0/16)
+      aws ec2 authorize-security-group-ingress \
+        --region {{ aws_region }} \
+        --group-id $SG_ID \
+        --protocol -1 \
+        --cidr 10.1.0.0/16 >/dev/null 2>&1 || true
+
+      # Allow all traffic from bastion VPC
+      aws ec2 authorize-security-group-ingress \
+        --region {{ aws_region }} \
+        --group-id $SG_ID \
+        --protocol -1 \
+        --cidr {{ bastion_vpc.cidr }} >/dev/null 2>&1 || true
+
+      # Allow all traffic from VM network (CUDN)
+      aws ec2 authorize-security-group-ingress \
+        --region {{ aws_region }} \
+        --group-id $SG_ID \
+        --protocol -1 \
+        --cidr 192.168.100.0/24 >/dev/null 2>&1 || true
+    else
+      # Security group exists - ensure it has the required rule for managed VPC
+      aws ec2 authorize-security-group-ingress \
+        --region {{ aws_region }} \
+        --group-id $SG_ID \
+        --protocol -1 \
+        --cidr 10.1.0.0/16 2>/dev/null || true
+    fi
+
+    echo $SG_ID
+  register: managed_router_sg
+  changed_when: false
+
+- name: Display router deployment info
+  debug:
+    msg:
+      - "Router Deployment (Amazon Linux 2023 + FRRouting)"
+      - "Hub VPC: {{ hub_vpc_id }}, Worker Subnet: {{ hub_subnet_id }} (us-east-1a)"
+      - "Managed VPC: {{ managed_vpc_id }}, Worker Subnet: {{ managed_subnet_id }} (us-east-1a)"
+      - "AMI: {{ router_ami_result.stdout }}"
+      - "NOTE: Routers deployed in same subnet as c5.metal workers for BGP peering"
+
+- name: Launch router for hub cluster with static IP
+  shell: |
+    # Check if instance already exists
+    INSTANCE_ID=$(aws ec2 describe-instances \
+      --region {{ aws_region }} \
+      --filters "Name=tag:Name,Values=frr-router-hub" \
+                "Name=instance-state-name,Values=running,pending" \
+      --query 'Reservations[0].Instances[0].InstanceId' \
+      --output text 2>/dev/null)
+
+    if [ "$INSTANCE_ID" == "None" ] || [ -z "$INSTANCE_ID" ]; then
+      echo "Creating new hub router instance..." >&2
+      # Launch new instance with static private IP
+      INSTANCE_ID=$(aws ec2 run-instances \
+        --region {{ aws_region }} \
+        --image-id {{ router_ami_result.stdout }} \
+        --instance-type {{ router_instance_type }} \
+        --key-name {{ router_key_name }} \
+        --subnet-id {{ hub_subnet_id }} \
+        --private-ip-address {{ hub_router_ip }} \
+        --security-group-ids {{ hub_router_sg.stdout }} \
+        --associate-public-ip-address \
+        --user-data file:///tmp/router-userdata.sh \
+        --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=frr-router-hub},{Key=Cluster,Value=hub},{Key=Router,Value=frr}]' \
+        --query 'Instances[0].InstanceId' \
+        --output text)
+
+      # Wait for instance to be running
+      aws ec2 wait instance-running \
+        --region {{ aws_region }} \
+        --instance-ids $INSTANCE_ID
+
+      # Disable source/destination check
+      aws ec2 modify-instance-attribute \
+        --region {{ aws_region }} \
+        --instance-id $INSTANCE_ID \
+        --no-source-dest-check
+
+      echo "Created instance: $INSTANCE_ID" >&2
+    else
+      echo "Found existing hub router instance: $INSTANCE_ID" >&2
+    fi
+
+    if [ -z "$INSTANCE_ID" ] || [ "$INSTANCE_ID" == "None" ]; then
+      echo "ERROR: Failed to get hub router instance ID" >&2
+      exit 1
+    fi
+
+    echo $INSTANCE_ID
+  register: router_hub_instance
+  changed_when: "'Created instance' in router_hub_instance.stderr"
+
+- name: Launch router for managed cluster with static IP
+  shell: |
+    # Check if instance already exists
+    INSTANCE_ID=$(aws ec2 describe-instances \
+      --region {{ aws_region }} \
+      --filters "Name=tag:Name,Values=frr-router-managed" \
+                "Name=instance-state-name,Values=running,pending" \
+      --query 'Reservations[0].Instances[0].InstanceId' \
+      --output text 2>/dev/null)
+
+    if [ "$INSTANCE_ID" == "None" ] || [ -z "$INSTANCE_ID" ]; then
+      echo "Creating new managed router instance..." >&2
+      # Launch new instance with static private IP
+      INSTANCE_ID=$(aws ec2 run-instances \
+        --region {{ aws_region }} \
+        --image-id {{ router_ami_result.stdout }} \
+        --instance-type {{ router_instance_type }} \
+        --key-name {{ router_key_name }} \
+        --subnet-id {{ managed_subnet_id }} \
+        --private-ip-address {{ managed_router_ip }} \
+        --security-group-ids {{ managed_router_sg.stdout }} \
+        --associate-public-ip-address \
+        --user-data file:///tmp/router-userdata.sh \
+        --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=frr-router-managed},{Key=Cluster,Value=managed},{Key=Router,Value=frr}]' \
+        --query 'Instances[0].InstanceId' \
+        --output text)
+
+      # Wait for instance to be running
+      aws ec2 wait instance-running \
+        --region {{ aws_region }} \
+        --instance-ids $INSTANCE_ID
+
+      # Disable source/destination check
+      aws ec2 modify-instance-attribute \
+        --region {{ aws_region }} \
+        --instance-id $INSTANCE_ID \
+        --no-source-dest-check
+
+      echo "Created instance: $INSTANCE_ID" >&2
+    else
+      echo "Found existing managed router instance: $INSTANCE_ID" >&2
+    fi
+
+    if [ -z "$INSTANCE_ID" ] || [ "$INSTANCE_ID" == "None" ]; then
+      echo "ERROR: Failed to get managed router instance ID" >&2
+      exit 1
+    fi
+
+    echo $INSTANCE_ID
+  register: router_managed_instance
+  changed_when: "'Created instance' in router_managed_instance.stderr"
+
+- name: Get hub router ENIs
+  shell: |
+    aws ec2 describe-instances \
+      --region {{ aws_region }} \
+      --instance-ids {{ router_hub_instance.stdout | trim }} \
+      --query 'Reservations[0].Instances[0].NetworkInterfaces[*].NetworkInterfaceId' \
+      --output text
+  register: hub_router_enis
+  changed_when: false
+  when: router_hub_instance.stdout is defined and router_hub_instance.stdout | trim | length > 0
+
+- name: Disable source/destination check on all hub router ENIs
+  shell: |
+    for ENI in {{ hub_router_enis.stdout }}; do
+      aws ec2 modify-network-interface-attribute \
+        --region {{ aws_region }} \
+        --network-interface-id $ENI \
+        --no-source-dest-check
+    done
+  changed_when: false
+  when: hub_router_enis is defined and hub_router_enis.stdout | length > 0
+
+- name: Get managed router ENIs
+  shell: |
+    aws ec2 describe-instances \
+      --region {{ aws_region }} \
+      --instance-ids {{ router_managed_instance.stdout | trim }} \
+      --query 'Reservations[0].Instances[0].NetworkInterfaces[*].NetworkInterfaceId' \
+      --output text
+  register: managed_router_enis
+  changed_when: false
+  when: router_managed_instance.stdout is defined and router_managed_instance.stdout | trim | length > 0
+
+- name: Disable source/destination check on all managed router ENIs
+  shell: |
+    for ENI in {{ managed_router_enis.stdout }}; do
+      aws ec2 modify-network-interface-attribute \
+        --region {{ aws_region }} \
+        --network-interface-id $ENI \
+        --no-source-dest-check
+    done
+  changed_when: false
+  when: managed_router_enis is defined and managed_router_enis.stdout | length > 0
+
+- name: Get router details
+  shell: |
+    aws ec2 describe-instances \
+      --region {{ aws_region }} \
+      --instance-ids {{ router_hub_instance.stdout }} {{ router_managed_instance.stdout }} \
+      --query 'Reservations[*].Instances[*].{Name:Tags[?Key==`Name`].Value|[0],PublicIp:PublicIpAddress,PrivateIp:PrivateIpAddress}' \
+      --output json
+  register: router_details
+  changed_when: false
+
+- name: Parse router details
+  set_fact:
+    router_info: "{{ router_details.stdout | from_json | flatten }}"
+
+- name: Display router details
+  debug:
+    msg:
+      - "=========================================="
+      - "FRRouting Routers Deployed"
+      - "=========================================="
+      - "Both routers in us-east-1a with bare metal nodes"
+      - ""
+      - "Hub Cluster Router:"
+      - "  Instance ID: {{ router_hub_instance.stdout }}"
+      - "  VPC: {{ hub_vpc_id }}, Subnet: {{ hub_subnet_id }}"
+      - "  Public IP: {{ router_info[0].PublicIp }}"
+      - "  Private IP: {{ router_info[0].PrivateIp }} (Static: {{ hub_router_ip }})"
+      - "  Used as default gateway for hub c5.metal nodes"
+      - "  SSH: ssh -i ~/.ssh/{{ router_key_name }} {{ router_user }}@{{ router_info[0].PublicIp }}"
+      - ""
+      - "Managed Cluster Router:"
+      - "  Instance ID: {{ router_managed_instance.stdout }}"
+      - "  VPC: {{ managed_vpc_id }}, Subnet: {{ managed_subnet_id }}"
+      - "  Public IP: {{ router_info[1].PublicIp }}"
+      - "  Private IP: {{ router_info[1].PrivateIp }} (Static: {{ managed_router_ip }})"
+      - "  Used as default gateway for managed c5.metal nodes"
+      - "  SSH: ssh -i ~/.ssh/{{ router_key_name }} {{ router_user }}@{{ router_info[1].PublicIp }}"
+      - ""
+      - "FRRouting Management:"
+      - "  Access CLI: sudo vtysh"
+      - "  Show config: show running-config"
+      - "  Show BGP: show ip bgp summary"
+      - ""
+      - "NOTE: MachineConfig will set these as default gateways for bare metal nodes"
+      - "=========================================="
+
+# Get full router instance details for use in subsequent tasks
+- name: Get hub router instance details
+  shell: |
+    aws ec2 describe-instances \
+      --region {{ aws_region }} \
+      --instance-ids {{ router_hub_instance.stdout }} \
+      --query 'Reservations[0]' \
+      --output json
+  register: hub_router_instance_json
+  changed_when: false
+
+- name: Set hub router instance fact
+  set_fact:
+    hub_router_instance: "{{ hub_router_instance_json.stdout | from_json }}"
+
+- name: Get managed router instance details
+  shell: |
+    aws ec2 describe-instances \
+      --region {{ aws_region }} \
+      --instance-ids {{ router_managed_instance.stdout }} \
+      --query 'Reservations[0]' \
+      --output json
+  register: managed_router_instance_json
+  changed_when: false
+
+- name: Set managed router instance fact
+  set_fact:
+    managed_router_instance: "{{ managed_router_instance_json.stdout | from_json }}"
+
+# Update security groups to allow router-worker communication
+- name: Update security groups
+  include_tasks: update_security_groups.yml
+
+# Configure NAT for routers when router_nat_enabled is true
+- name: Configure router NAT and routing
+  include_tasks: configure_router_nat.yml
+  when: router_nat_enabled | default(false) | bool
+
+# NOTE: Worker default routes on main routing table (254) MUST NOT be changed
+# - Main table needs AWS gateway (e.g., 10.0.11.1) for API server connectivity
+# - Changing this breaks kubelet communication and node metrics
+# - RHCOS nodes don't allow SSH access anyway (update_worker_default_routes_immediate.yml tries SSH)
+# - VRF routing tables for CUDN are handled separately (see playbook 14c-worker-bgp-routing.yml)
+#
+# - name: Update worker default routes
+#   include_tasks: update_worker_default_routes_immediate.yml

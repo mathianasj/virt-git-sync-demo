@@ -10,6 +10,17 @@
       include_vars:
         file: "{{ playbook_dir }}/../group_vars/all.yml"
 
+    - name: Display phase timing information
+      debug:
+        msg:
+          - "=========================================="
+          - "Phase 2: AWS Infrastructure Setup"
+          - "=========================================="
+          - "Expected Runtime: 5-10 minutes"
+          - "Started: {{ ansible_date_time.time }}"
+          - "Estimated Completion: {{ '%02d:%02d' | format((ansible_date_time.hour | int + ((ansible_date_time.minute | int + 10) // 60)) % 24, (ansible_date_time.minute | int + 10) % 60) }}"
+          - "=========================================="
+
     - name: Update clusters configuration with selected domain
       set_fact:
         clusters: |
@@ -27,7 +38,10 @@
       debug:
         msg:
           - "AWS infrastructure created successfully"
-          - "VPC ID: {{ vpc_id }}"
+          - "Bastion VPC ID: {{ bastion_vpc_id }} ({{ bastion_vpc.cidr }})"
+          - "Hub VPC ID: {{ vpc_map['hub-cluster-vpc'] }} ({{ vpcs[0].cidr }})"
+          - "Managed VPC ID: {{ vpc_map['managed-cluster-vpc'] }} ({{ vpcs[1].cidr }})"
+          - "VPC Peering: {{ 'Enabled' if enable_vpc_peering else 'Disabled' }}"
           - "Bastion Public IP: {{ bastion_public_ip }}"
           - "Bastion SSH: ssh -i ~/.ssh/{{ bastion_key_name }} {{ bastion_user }}@{{ bastion_public_ip }}"
 

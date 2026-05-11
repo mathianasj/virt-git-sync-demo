@@ -1,0 +1,64 @@
+---
+- name: Set kubeconfig environment
+  set_fact:
+    kubeconfig_env:
+      KUBECONFIG: "{{ hub_kubeconfig }}"
+
+- name: Display ODF deployment overview
+  debug:
+    msg:
+      - "=========================================="
+      - "OpenShift Data Foundation Deployment"
+      - "=========================================="
+      - "Creating storage infrastructure:"
+      - "  - Storage nodes: {{ odf_storage_replicas }} per cluster ({{ odf_storage_replicas * 2 }} total)"
+      - "  - Instance type: {{ odf_storage_instance_type }}"
+      - "  - Storage per node: {{ odf_storage_volume_size }}GB"
+      - "  - Total storage capacity: {{ odf_storage_volume_size * odf_storage_replicas * 2 }}GB"
+      - "  - Node taint: node.ocs.openshift.io/storage=true:NoSchedule"
+      - ""
+      - "Deploying ODF operator and StorageCluster to both clusters"
+      - "  - Configuration: Lean mode (reduced resource footprint)"
+      - "=========================================="
+
+- name: Include storage MachineSet creation tasks
+  include_tasks: storage_machinesets.yml
+
+- name: Include ODF operator policy tasks
+  include_tasks: operator_policy.yml
+
+- name: Include StorageCluster policy tasks
+  include_tasks: storage_cluster_policy_simplified.yml
+
+- name: Include StorageClass virtualization annotation policy tasks
+  include_tasks: storageclass_virt_annotation_policy.yml
+
+- name: Display ODF deployment status
+  debug:
+    msg:
+      - "=========================================="
+      - "ODF Deployment Complete"
+      - "=========================================="
+      - "Storage nodes: {{ odf_storage_replicas }} per cluster (dedicated storage nodes only)"
+      - "ODF operator: Installed on both clusters"
+      - "StorageCluster: Deployed on both clusters"
+      - ""
+      - "Storage Classes created:"
+      - "  - ocs-storagecluster-ceph-rbd (Block)"
+      - "  - ocs-storagecluster-ceph-rbd-virtualization (Block for VMs) [DEFAULT FOR VIRTUALIZATION]"
+      - "  - ocs-storagecluster-cephfs (File)"
+      - "  - openshift-storage.noobaa.io (Object)"
+      - ""
+      - "Configuration:"
+      - "  - Default virtualization storage class: ocs-storagecluster-ceph-rbd-virtualization"
+      - "  - Node placement: Only {{ odf_storage_replicas }} labeled storage nodes per cluster"
+      - "  - Node taint: node.ocs.openshift.io/storage=true:NoSchedule (ODF pods only)"
+      - "  - Lean mode: Reduced CPU/memory limits for Ceph components"
+      - "  - Optimized for VMs and regular workloads"
+      - ""
+      - "Verification:"
+      - "  oc get storagecluster -n {{ odf_namespace }}"
+      - "  oc get storageclass"
+      - "  oc get nodes -l cluster.ocs.openshift.io/openshift-storage=''"
+      - "  oc get pods -n {{ odf_namespace }}"
+      - "=========================================="

@@ -1,0 +1,155 @@
+---
+# Update VPC route tables to route internet traffic through BGP routers
+
+# Get hub cluster private route table
+- name: Get hub cluster private route table
+  shell: |
+    aws ec2 describe-route-tables \
+      --region {{ aws_region }} \
+      --filters "Name=vpc-id,Values={{ hub_vpc_id }}" \
+                "Name=tag:Name,Values=*private*" \
+      --query 'RouteTables[0].RouteTableId' \
+      --output text
+  register: hub_private_rt
+  changed_when: false
+
+# Get managed cluster private route table
+- name: Get managed cluster private route table
+  shell: |
+    aws ec2 describe-route-tables \
+      --region {{ aws_region }} \
+      --filters "Name=vpc-id,Values={{ managed_vpc_id }}" \
+                "Name=tag:Name,Values=*private*" \
+      --query 'RouteTables[0].RouteTableId' \
+      --output text
+  register: managed_private_rt
+  changed_when: false
+
+# Get hub router primary ENI
+- name: Get hub router primary ENI
+  shell: |
+    aws ec2 describe-instances \
+      --region {{ aws_region }} \
+      --instance-ids {{ router_hub_instance.stdout }} \
+      --query 'Reservations[0].Instances[0].NetworkInterfaces[?Attachment.DeviceIndex==`0`].NetworkInterfaceId' \
+      --output text
+  register: hub_router_eni
+  changed_when: false
+
+# Get managed router primary ENI
+- name: Get managed router primary ENI
+  shell: |
+    aws ec2 describe-instances \
+      --region {{ aws_region }} \
+      --instance-ids {{ router_managed_instance.stdout }} \
+      --query 'Reservations[0].Instances[0].NetworkInterfaces[?Attachment.DeviceIndex==`0`].NetworkInterfaceId' \
+      --output text
+  register: managed_router_eni
+  changed_when: false
+
+- name: Display route table information
+  debug:
+    msg:
+      - "VPC Route Table Configuration"
+      - "Hub Private RT: {{ hub_private_rt.stdout }}"
+      - "Hub Router ENI: {{ hub_router_eni.stdout }}"
+      - "Managed Private RT: {{ managed_private_rt.stdout }}"
+      - "Managed Router ENI: {{ managed_router_eni.stdout }}"
+
+# Update hub cluster route table
+- name: Check existing hub default route
+  shell: |
+    aws ec2 describe-route-tables \
+      --region {{ aws_region }} \
+      --route-table-ids {{ hub_private_rt.stdout }} \
+      --query 'RouteTables[0].Routes[?DestinationCidrBlock==`0.0.0.0/0`].GatewayId' \
+      --output text
+  register: hub_existing_route
+  changed_when: false
+
+- name: Delete existing hub default route if it points to NAT gateway
+  shell: |
+    aws ec2 delete-route \
+      --region {{ aws_region }} \
+      --route-table-id {{ hub_private_rt.stdout }} \
+      --destination-cidr-block 0.0.0.0/0
+  when: hub_existing_route.stdout | length > 0 and 'nat-' in hub_existing_route.stdout
+  register: hub_route_deleted
+  failed_when: false
+
+- name: Create or replace hub default route to router ENI
+  shell: |
+    aws ec2 create-route \
+      --region {{ aws_region }} \
+      --route-table-id {{ hub_private_rt.stdout }} \
+      --destination-cidr-block 0.0.0.0/0 \
+      --network-interface-id {{ hub_router_eni.stdout }} 2>&1
+  register: hub_route_result
+  changed_when: "'CreateRoute' in hub_route_result.stdout"
+  failed_when: false
+
+- name: Replace hub route if creation failed due to existing route
+  shell: |
+    aws ec2 replace-route \
+      --region {{ aws_region }} \
+      --route-table-id {{ hub_private_rt.stdout }} \
+      --destination-cidr-block 0.0.0.0/0 \
+      --network-interface-id {{ hub_router_eni.stdout }}
+  when: hub_route_result.rc != 0 and 'RouteAlreadyExists' in hub_route_result.stderr
+
+# Update managed cluster route table
+- name: Check existing managed default route
+  shell: |
+    aws ec2 describe-route-tables \
+      --region {{ aws_region }} \
+      --route-table-ids {{ managed_private_rt.stdout }} \
+      --query 'RouteTables[0].Routes[?DestinationCidrBlock==`0.0.0.0/0`].GatewayId' \
+      --output text
+  register: managed_existing_route
+  changed_when: false
+
+- name: Delete existing managed default route if it points to NAT gateway
+  shell: |
+    aws ec2 delete-route \
+      --region {{ aws_region }} \
+      --route-table-id {{ managed_private_rt.stdout }} \
+      --destination-cidr-block 0.0.0.0/0
+  when: managed_existing_route.stdout | length > 0 and 'nat-' in managed_existing_route.stdout
+  register: managed_route_deleted
+  failed_when: false
+
+- name: Create or replace managed default route to router ENI
+  shell: |
+    aws ec2 create-route \
+      --region {{ aws_region }} \
+      --route-table-id {{ managed_private_rt.stdout }} \
+      --destination-cidr-block 0.0.0.0/0 \
+      --network-interface-id {{ managed_router_eni.stdout }} 2>&1
+  register: managed_route_result
+  changed_when: "'CreateRoute' in managed_route_result.stdout"
+  failed_when: false
+
+- name: Replace managed route if creation failed due to existing route
+  shell: |
+    aws ec2 replace-route \
+      --region {{ aws_region }} \
+      --route-table-id {{ managed_private_rt.stdout }} \
+      --destination-cidr-block 0.0.0.0/0 \
+      --network-interface-id {{ managed_router_eni.stdout }}
+  when: managed_route_result.rc != 0 and 'RouteAlreadyExists' in managed_route_result.stderr
+
+- name: Route table update summary
+  debug:
+    msg:
+      - "=========================================="
+      - "VPC Route Tables Updated"
+      - "=========================================="
+      - "Hub Cluster:"
+      - "  Route Table: {{ hub_private_rt.stdout }}"
+      - "  Default Route: 0.0.0.0/0 → {{ hub_router_eni.stdout }} (BGP Router)"
+      - ""
+      - "Managed Cluster:"
+      - "  Route Table: {{ managed_private_rt.stdout }}"
+      - "  Default Route: 0.0.0.0/0 → {{ managed_router_eni.stdout }} (BGP Router)"
+      - ""
+      - "All internet traffic from worker nodes now routes through BGP routers"

@@ -1,0 +1,46 @@
+---
+# Save router instance information to state file
+# This updates the infrastructure state with router details for later use
+
+- name: Check if infrastructure state file exists
+  stat:
+    path: /tmp/aws-infrastructure-state.json
+  register: state_file
+  delegate_to: localhost
+
+- name: Read existing infrastructure state
+  slurp:
+    src: /tmp/aws-infrastructure-state.json
+  register: existing_state
+  when: state_file.stat.exists
+  delegate_to: localhost
+
+- name: Parse existing state
+  set_fact:
+    infrastructure_state: "{{ existing_state.content | b64decode | from_json if state_file.stat.exists else {} }}"
+
+- name: Add router information to state
+  set_fact:
+    updated_state: |
+      {{ infrastructure_state | combine({
+        'router_instances': {
+          'hub': router_hub_instance.stdout,
+          'managed': router_managed_instance.stdout
+        },
+        'router_details': router_info
+      }, recursive=True) }}
+
+- name: Save updated infrastructure state
+  copy:
+    content: "{{ updated_state | to_nice_json }}"
+    dest: /tmp/aws-infrastructure-state.json
+    mode: '0644'
+  delegate_to: localhost
+
+- name: Display state update confirmation
+  debug:
+    msg:
+      - "Infrastructure state updated with router information"
+      - "Hub router: {{ router_hub_instance.stdout }}"
+      - "Managed router: {{ router_managed_instance.stdout }}"
+      - "State file: /tmp/aws-infrastructure-state.json"

@@ -1,0 +1,130 @@
+---
+- name: Build namespace selector labels dictionary
+  set_fact:
+    cudn_selector_labels: "{{ {cudn_namespace_label_key: cudn_namespace_label_value} }}"
+  when: cudn_selector_labels is not defined
+
+- name: Create CUDN policy (both clusters)
+  kubernetes.core.k8s:
+    kubeconfig: "{{ hub_kubeconfig }}"
+    state: present
+    definition:
+      apiVersion: policy.open-cluster-management.io/v1
+      kind: Policy
+      metadata:
+        name: policy-cluster-user-defined-network
+        namespace: "{{ cudn_policy_namespace }}"
+        annotations:
+          policy.open-cluster-management.io/standards: NIST-CSF
+          policy.open-cluster-management.io/categories: CM Configuration Management
+          policy.open-cluster-management.io/controls: CM-2 Baseline Configuration
+      spec:
+        remediationAction: enforce
+        disabled: false
+        policy-templates:
+          - objectDefinition:
+              apiVersion: policy.open-cluster-management.io/v1
+              kind: ConfigurationPolicy
+              metadata:
+                name: policy-cudn-resource
+              spec:
+                remediationAction: enforce
+                severity: high
+                object-templates:
+                  - complianceType: musthave
+                    recreateOption: IfRequired
+                    objectDefinition:
+                      apiVersion: k8s.ovn.org/v1
+                      kind: ClusterUserDefinedNetwork
+                      metadata:
+                        name: "{{ cudn_network_name }}"
+                      spec:
+                        namespaceSelector:
+                          matchLabels: "{{ cudn_selector_labels }}"
+                        network:
+                          topology: Layer2
+                          layer2:
+                            role: Primary
+                            subnets:
+                              - "{{ cudn_cidr }}"
+                            ipam:
+                              lifecycle: Persistent
+
+- name: Create PlacementRule for CUDN (all clusters)
+  kubernetes.core.k8s:
+    kubeconfig: "{{ hub_kubeconfig }}"
+    state: present
+    definition:
+      apiVersion: apps.open-cluster-management.io/v1
+      kind: PlacementRule
+      metadata:
+        name: placement-cudn
+        namespace: "{{ cudn_policy_namespace }}"
+      spec:
+        clusterSelector:
+          matchExpressions:
+            - key: vendor
+              operator: In
+              values:
+                - OpenShift
+
+- name: Create PlacementBinding for CUDN
+  kubernetes.core.k8s:
+    kubeconfig: "{{ hub_kubeconfig }}"
+    state: present
+    definition:
+      apiVersion: policy.open-cluster-management.io/v1
+      kind: PlacementBinding
+      metadata:
+        name: binding-cudn
+        namespace: "{{ cudn_policy_namespace }}"
+      placementRef:
+        name: placement-cudn
+        kind: PlacementRule
+        apiGroup: apps.open-cluster-management.io
+      subjects:
+        - name: policy-cluster-user-defined-network
+          kind: Policy
+          apiGroup: policy.open-cluster-management.io
+
+- name: Wait for CUDN policy compliance on both clusters
+  shell: |
+    oc get policy policy-cluster-user-defined-network -n {{ cudn_policy_namespace }} -o json | \
+    jq -r '.status.status[] | select(.compliant=="Compliant") | .clustername' | wc -l
+  environment:
+    KUBECONFIG: "{{ hub_kubeconfig }}"
+  register: cudn_compliant_clusters
+  until: cudn_compliant_clusters.stdout | int >= 2
+  retries: "{{ operator_timeout_minutes | int }}"
+  delay: 60
+  changed_when: false
+
+- name: Verify CUDN on hub cluster
+  shell: |
+    oc get clusteruserdefinednetwork {{ cudn_network_name }} -o jsonpath='{.metadata.name}' 2>/dev/null || echo ""
+  environment:
+    KUBECONFIG: "{{ clusters[0].install_dir }}/auth/kubeconfig"
+  register: cudn_hub_status
+  until: cudn_hub_status.stdout == cudn_network_name
+  retries: 10
+  delay: 30
+  changed_when: false
+
+- name: Verify CUDN on managed cluster
+  shell: |
+    oc get clusteruserdefinednetwork {{ cudn_network_name }} -o jsonpath='{.metadata.name}' 2>/dev/null || echo ""
+  environment:
+    KUBECONFIG: "{{ clusters[1].install_dir }}/auth/kubeconfig"
+  register: cudn_managed_status
+  until: cudn_managed_status.stdout == cudn_network_name
+  retries: 10
+  delay: 30
+  changed_when: false
+
+- name: Display CUDN policy status
+  debug:
+    msg:
+      - "ClusterUserDefinedNetwork policy compliance achieved"
+      - "Compliant clusters: {{ cudn_compliant_clusters.stdout }}"
+      - "CUDN {{ cudn_network_name }} created on both clusters"
+      - "Network ready for KubeVirt VM attachment"

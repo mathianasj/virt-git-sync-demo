@@ -1,0 +1,163 @@
+---
+- name: Get router private IPs
+  shell: |
+    HUB_ROUTER=$(aws ec2 describe-instances \
+      --region {{ aws_region }} \
+      --filters "Name=tag:Name,Values=frr-router-hub" \
+                "Name=instance-state-name,Values=running" \
+      --query 'Reservations[0].Instances[0].PrivateIpAddress' \
+      --output text)
+
+    MANAGED_ROUTER=$(aws ec2 describe-instances \
+      --region {{ aws_region }} \
+      --filters "Name=tag:Name,Values=frr-router-managed" \
+                "Name=instance-state-name,Values=running" \
+      --query 'Reservations[0].Instances[0].PrivateIpAddress' \
+      --output text)
+
+    echo "$HUB_ROUTER $MANAGED_ROUTER"
+  register: router_ips
+  changed_when: false
+  delegate_to: localhost
+  become: no
+
+- name: Parse router IPs
+  set_fact:
+    hub_router_ip: "{{ router_ips.stdout.split()[0] }}"
+    managed_router_ip: "{{ router_ips.stdout.split()[1] }}"
+
+- name: Check if RouteAdvertisements CRD exists on hub cluster
+  shell: |
+    oc get crd routeadvertisements.k8s.ovn.org 2>/dev/null && echo "exists" || echo "missing"
+  environment:
+    KUBECONFIG: "{{ clusters[0].install_dir }}/auth/kubeconfig"
+  register: routeadv_crd_check
+  changed_when: false
+  failed_when: false
+
+- name: Set RouteAdvertisements availability flag
+  set_fact:
+    routeadv_available: "{{ 'exists' in routeadv_crd_check.stdout }}"
+
+- name: Display RouteAdvertisement configuration
+  debug:
+    msg:
+      - "=========================================="
+      - "RouteAdvertisement Configuration"
+      - "=========================================="
+      - "RouteAdvertisements CRD: {{ 'Available' if routeadv_available else 'Not available (skipping)' }}"
+      - "{{ 'Hub cluster:' if routeadv_available else 'Note: RouteAdvertisement feature requires OVN-Kubernetes with secondary network support' }}"
+      - "{{ '  Peer: ' + hub_router_ip + ' (ASN ' + (bgp_router_asn | string) + ')' if routeadv_available else 'Continuing with existing FRRConfiguration-based BGP setup' }}"
+      - "{{ '  Local ASN: ' + (bgp_asn_hub | string) if routeadv_available else '' }}"
+      - "{{ 'Managed cluster:' if routeadv_available else '' }}"
+      - "{{ '  Peer: ' + managed_router_ip + ' (ASN ' + (bgp_router_asn | string) + ')' if routeadv_available else '' }}"
+      - "{{ '  Local ASN: ' + (bgp_asn_managed | string) if routeadv_available else '' }}"
+      - "=========================================="
+
+- name: Label existing FRRConfiguration on hub cluster for CUDN advertisement
+  shell: |
+    oc label frrconfiguration hub-bgp-peering -n openshift-frr-k8s advertise-cudn=true --overwrite
+  environment:
+    KUBECONFIG: "{{ clusters[0].install_dir }}/auth/kubeconfig"
+  changed_when: true
+  failed_when: false
+  when: routeadv_available | bool
+
+- name: Create RouteAdvertisement for hub cluster CUDN network
+  shell: |
+    cat <<EOF | oc apply -f -
+    apiVersion: k8s.ovn.org/v1
+    kind: RouteAdvertisements
+    metadata:
+      name: cudn-advertisement
+    spec:
+      advertisements:
+        - PodNetwork
+      nodeSelector: {}
+      networkSelectors:
+        - networkSelectionType: ClusterUserDefinedNetworks
+          clusterUserDefinedNetworkSelector:
+            networkSelector:
+              matchLabels:
+                k8s.ovn.org/network: {{ cudn_network_name }}
+      frrConfigurationSelector:
+        matchLabels:
+          advertise-cudn: "true"
+    EOF
+  environment:
+    KUBECONFIG: "{{ clusters[0].install_dir }}/auth/kubeconfig"
+  changed_when: true
+  when: routeadv_available | bool
+
+- name: Label existing FRRConfiguration on managed cluster for CUDN advertisement
+  shell: |
+    oc label frrconfiguration managed-bgp-peering -n openshift-frr-k8s advertise-cudn=true --overwrite
+  environment:
+    KUBECONFIG: "{{ clusters[1].install_dir }}/auth/kubeconfig"
+  changed_when: true
+  failed_when: false
+  when: routeadv_available | bool
+
+- name: Create RouteAdvertisement for managed cluster CUDN network
+  shell: |
+    cat <<EOF | oc apply -f -
+    apiVersion: k8s.ovn.org/v1
+    kind: RouteAdvertisements
+    metadata:
+      name: cudn-advertisement
+    spec:
+      advertisements:
+        - PodNetwork
+      nodeSelector: {}
+      networkSelectors:
+        - networkSelectionType: ClusterUserDefinedNetworks
+          clusterUserDefinedNetworkSelector:
+            networkSelector:
+              matchLabels:
+                k8s.ovn.org/network: {{ cudn_network_name }}
+      frrConfigurationSelector:
+        matchLabels:
+          advertise-cudn: "true"
+    EOF
+  environment:
+    KUBECONFIG: "{{ clusters[1].install_dir }}/auth/kubeconfig"
+  changed_when: true
+  when: routeadv_available | bool
+
+- name: Wait for RouteAdvertisement to be processed
+  pause:
+    seconds: 10
+  when: routeadv_available | bool
+
+- name: Verify FRRConfiguration created by RouteAdvertisement on hub
+  shell: |
+    oc get frrconfiguration -n openshift-frr-k8s -l k8s.ovn.org/route-advertisements=cudn-advertisement -o name
+  environment:
+    KUBECONFIG: "{{ clusters[0].install_dir }}/auth/kubeconfig"
+  register: hub_ovn_frr_config
+  until: hub_ovn_frr_config.stdout != ""
+  retries: 5
+  delay: 5
+  changed_when: false
+  failed_when: false
+  when: routeadv_available | bool
+
+- name: Verify FRRConfiguration created by RouteAdvertisement on managed
+  shell: |
+    oc get frrconfiguration -n openshift-frr-k8s -l k8s.ovn.org/route-advertisements=cudn-advertisement -o name
+  environment:
+    KUBECONFIG: "{{ clusters[1].install_dir }}/auth/kubeconfig"
+  register: managed_ovn_frr_config
+  until: managed_ovn_frr_config.stdout != ""
+  retries: 5
+  delay: 5
+  changed_when: false
+  failed_when: false
+  when: routeadv_available | bool
+
+- name: Display RouteAdvertisement status
+  debug:
+    msg:
+      - "{{ 'RouteAdvertisement resources created' if routeadv_available else 'RouteAdvertisements not available - using existing FRRConfiguration setup' }}"
+      - "{{ 'Hub FRRConfigurations: ' + (hub_ovn_frr_config.stdout_lines | default(['None']) | join(', ')) if routeadv_available else 'BGP routing configured via playbook 14 (FRRConfiguration resources)' }}"
+      - "{{ 'Managed FRRConfigurations: ' + (managed_ovn_frr_config.stdout_lines | default(['None']) | join(', ')) if routeadv_available else '' }}"

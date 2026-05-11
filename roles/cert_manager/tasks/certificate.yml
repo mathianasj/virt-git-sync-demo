@@ -1,0 +1,23 @@
+---
+- name: Create wildcard certificate for apps domain
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: present
+    definition: "{{ lookup('template', 'wildcard-certificate.yml.j2') | from_yaml }}"
+
+- name: Wait for certificate to be issued
+  shell: |
+    oc get certificate wildcard-apps-cert -n openshift-ingress -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}'
+  environment: "{{ kubeconfig_env }}"
+  register: cert_status
+  until: cert_status.stdout == "True"
+  retries: 60
+  delay: 30
+  changed_when: false
+
+- name: Verify certificate secret exists
+  shell: |
+    oc get secret wildcard-apps-tls -n openshift-ingress -o jsonpath='{.type}'
+  environment: "{{ kubeconfig_env }}"
+  register: cert_secret
+  changed_when: false

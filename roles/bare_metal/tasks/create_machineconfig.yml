@@ -1,0 +1,129 @@
+---
+# Create MachineConfig to set default gateway to BGP router for c5.metal nodes
+# Following Red Hat solution: https://access.redhat.com/solutions/3868301
+
+- name: Set router IP for {{ cluster_config.cluster_name }}
+  set_fact:
+    router_ip: "{{ hub_router_ip if cluster_config.cluster_name == 'hub' else managed_router_ip }}"
+
+- name: Create set-gw.sh script content for {{ cluster_config.cluster_name }}
+  set_fact:
+    set_gw_script: |
+      #!/bin/bash
+      # Get the primary network interface (typically ens5 on c5.metal in AWS)
+      INTERFACE=$(ip route show default | head -1 | awk '{print $5}')
+
+      if [ -z "$INTERFACE" ]; then
+        echo "ERROR: Could not determine primary interface"
+        exit 1
+      fi
+
+      # Get the node's IP address
+      NODE_IP=$(ip -4 addr show dev $INTERFACE | grep -oP '(?<=inet\s)\d+(\.\d+){3}')
+
+      if [ -z "$NODE_IP" ]; then
+        echo "ERROR: Could not determine node IP address"
+        exit 1
+      fi
+
+      echo "Node IP: $NODE_IP on interface $INTERFACE"
+
+      # Check if this node is in the same subnet as the BGP router
+      # Router IP: {{ router_ip }}
+      # Extract /24 subnet (first 3 octets) from both node and router
+      ROUTER_SUBNET=$(echo "{{ router_ip }}" | cut -d. -f1-3)
+      NODE_SUBNET=$(echo $NODE_IP | cut -d. -f1-3)
+
+      if [ "$NODE_SUBNET" != "$ROUTER_SUBNET" ]; then
+        echo "INFO: Node not in router subnet (node: $NODE_SUBNET.0/24, router: $ROUTER_SUBNET.0/24)"
+        echo "INFO: Keeping default AWS gateway - this node should not route through BGP router"
+        exit 0
+      fi
+
+      echo "INFO: Node is in router subnet - updating gateway to {{ router_ip }}"
+
+      # Find or create a connection for the physical interface
+      # This runs BEFORE kubelet/OVS, so we configure the base interface
+      CON=$(/bin/nmcli -t -f NAME,DEVICE con show | grep ":${INTERFACE}$" | cut -d: -f1 | head -1)
+
+      if [ -z "$CON" ]; then
+        echo "No existing connection found for $INTERFACE, creating one..."
+        CON="System $INTERFACE"
+        /bin/nmcli con add type ethernet con-name "$CON" ifname $INTERFACE
+      fi
+
+      echo "Connection name: $CON"
+
+      # Configure connection: DHCP for IP, but ignore DHCP gateway and use ours
+      /bin/nmcli con modify "$CON" ipv4.method auto
+      /bin/nmcli con modify "$CON" ipv4.ignore-auto-routes yes
+      /bin/nmcli con modify "$CON" ipv4.routes "0.0.0.0/0 {{ router_ip }}"
+      /bin/nmcli con modify "$CON" connection.autoconnect yes
+
+      # Apply the configuration
+      /bin/nmcli con up "$CON"
+
+      echo "Gateway successfully set to {{ router_ip }} on $INTERFACE (connection: $CON)"
+      echo "Configuration: DHCP for IP, static gateway via ipv4.routes"
+
+- name: Base64 encode the script
+  set_fact:
+    set_gw_script_b64: "{{ set_gw_script | b64encode }}"
+
+- name: Create MachineConfig for {{ cluster_config.cluster_name }} bare metal routing
+  kubernetes.core.k8s:
+    kubeconfig: "{{ cluster_config.install_dir }}/auth/kubeconfig"
+    state: present
+    definition:
+      apiVersion: machineconfiguration.openshift.io/v1
+      kind: MachineConfig
+      metadata:
+        name: 98-worker-cnv-bgp-gateway
+        labels:
+          machineconfiguration.openshift.io/role: worker
+      spec:
+        config:
+          ignition:
+            version: 3.2.0
+          storage:
+            files:
+              - contents:
+                  source: "data:text/plain;charset=utf-8;base64,{{ set_gw_script_b64 }}"
+                mode: 0755
+                overwrite: true
+                path: /usr/local/bin/set-gw.sh
+          systemd:
+            units:
+              - contents: |
+                  [Unit]
+                  Description=Set default gateway to BGP router
+                  Wants=network-online.target
+                  After=network-online.target ignition-firstboot-complete.service
+                  Before=kubelet.service crio.service
+
+                  [Service]
+                  Type=oneshot
+                  ExecStart=/usr/local/bin/set-gw.sh
+                  ExecStart=/bin/systemctl daemon-reload
+
+                  [Install]
+                  WantedBy=kubelet.service
+                enabled: true
+                name: systemd-bgp-gw.service
+
+- name: Display MachineConfig created for {{ cluster_config.cluster_name }}
+  debug:
+    msg:
+      - "MachineConfig created: 98-worker-cnv-bgp-gateway"
+      - "Target role: worker"
+      - "Default gateway: {{ router_ip }}"
+      - "Router subnet: {{ router_ip | regex_replace('\\.[0-9]+$', '.0/24') }}"
+      - "Method: NetworkManager (nmcli)"
+      - "Applies to: Worker nodes in same /24 subnet as router only"
+      - "Other workers: Keep AWS default gateway (no change)"
+      - "Script location: /usr/local/bin/set-gw.sh"
+      - ""
+      - "The script checks node subnet before applying gateway change:"
+      - "  - Compares first 3 octets of node IP vs router IP"
+      - "  - If match: Update gateway to {{ router_ip }}"
+      - "  - If no match: Keep existing AWS gateway"

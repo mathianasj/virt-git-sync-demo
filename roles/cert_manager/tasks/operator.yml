@@ -1,0 +1,84 @@
+---
+- name: Create cert-manager namespace
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: cert-manager
+
+- name: Create OperatorGroup for cert-manager
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: present
+    definition:
+      apiVersion: operators.coreos.com/v1
+      kind: OperatorGroup
+      metadata:
+        name: cert-manager-operator
+        namespace: cert-manager
+      spec:
+        targetNamespaces:
+          - cert-manager
+
+- name: Create Subscription for cert-manager operator
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: present
+    definition:
+      apiVersion: operators.coreos.com/v1alpha1
+      kind: Subscription
+      metadata:
+        name: openshift-cert-manager-operator
+        namespace: cert-manager
+      spec:
+        channel: stable-v1
+        installPlanApproval: Automatic
+        name: openshift-cert-manager-operator
+        source: redhat-operators
+        sourceNamespace: openshift-marketplace
+
+- name: Wait for cert-manager operator to be ready
+  shell: |
+    oc get csv -n cert-manager | grep cert-manager | grep -q Succeeded
+  environment: "{{ kubeconfig_env }}"
+  register: certmanager_csv
+  until: certmanager_csv.rc == 0
+  retries: "{{ operator_timeout_minutes | default(10) | int }}"
+  delay: 60
+  changed_when: false
+
+- name: Wait for cert-manager deployment to be ready
+  shell: |
+    oc get deployment cert-manager -n cert-manager -o jsonpath='{.status.availableReplicas}'
+  environment: "{{ kubeconfig_env }}"
+  register: certmanager_replicas
+  until: certmanager_replicas.stdout | int > 0
+  retries: 20
+  delay: 30
+  changed_when: false
+
+- name: Configure custom DNS servers for DNS-01 validation
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: present
+    definition:
+      apiVersion: operator.openshift.io/v1alpha1
+      kind: CertManager
+      metadata:
+        name: cluster
+      spec:
+        unsupportedConfigOverrides:
+          controller:
+            args:
+              - '--dns01-recursive-nameservers-only'
+              - '--dns01-recursive-nameservers=8.8.8.8:53,1.1.1.1:53'
+
+- name: Wait for cert-manager to restart with new DNS configuration
+  shell: |
+    oc rollout status deployment cert-manager -n cert-manager --timeout=5m
+  environment: "{{ kubeconfig_env }}"
+  register: certmanager_rollout
+  changed_when: false

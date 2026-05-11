@@ -1,33 +1,22 @@
 ---
-- name: Create SSH key pair for bastion
-  amazon.aws.ec2_key:
-    name: "{{ bastion_key_name }}"
-    region: "{{ aws_region }}"
-    state: present
-  register: bastion_key
-
-- name: Save private key locally
-  copy:
-    content: "{{ bastion_key.key.private_key }}"
-    dest: "~/.ssh/{{ bastion_key_name }}"
-    mode: '0600'
-  when: bastion_key.key.private_key is defined
+- name: Validate and synchronize SSH keys
+  include_tasks: validate_ssh_keys.yml
 
 - name: Launch bastion EC2 instance
   amazon.aws.ec2_instance:
-    name: "{{ vpc_name }}-bastion"
+    name: "{{ bastion_vpc.name }}-bastion"
     region: "{{ aws_region }}"
     instance_type: "{{ bastion_instance_type }}"
     image_id: "{{ bastion_ami }}"
     key_name: "{{ bastion_key_name }}"
-    vpc_subnet_id: "{{ public_subnet_ids[0] }}"
+    vpc_subnet_id: "{{ bastion_public_subnet_id }}"
     security_groups:
       - "{{ bastion_sg_id }}"
     network:
       assign_public_ip: yes
     iam_instance_profile: OpenShiftBastionProfile
     tags:
-      Name: "{{ vpc_name }}-bastion"
+      Name: "{{ bastion_vpc.name }}-bastion"
       Project: openshift-dual-cluster
       Role: bastion
     wait: yes

@@ -1,0 +1,64 @@
+---
+# This task file can be used for manual failover operations
+# Usage: ansible-playbook with --tags failover
+
+- name: Get current active cluster
+  shell: |
+    oc get managedclusters -l virtgitsync-active=true -o jsonpath='{.items[0].metadata.name}'
+  environment: "{{ kubeconfig_env }}"
+  register: current_active
+  changed_when: false
+  failed_when: false
+
+- name: Display current active cluster
+  debug:
+    msg:
+      - "Current active cluster: {{ current_active.stdout if current_active.stdout != '' else 'None' }}"
+
+- name: Determine target cluster for failover
+  set_fact:
+    target_cluster: "{{ 'managed' if current_active.stdout == 'local-cluster' else 'local-cluster' }}"
+    source_cluster: "{{ current_active.stdout }}"
+  when: current_active.stdout != ''
+
+- name: Remove active label from current cluster
+  shell: |
+    oc label managedcluster {{ source_cluster }} virtgitsync-active-
+  environment: "{{ kubeconfig_env }}"
+  when: current_active.stdout != ''
+  register: remove_label
+  failed_when: remove_label.rc != 0 and 'not found' not in remove_label.stderr
+
+- name: Add active label to target cluster
+  shell: |
+    oc label managedcluster {{ target_cluster }} virtgitsync-active=true --overwrite
+  environment: "{{ kubeconfig_env }}"
+  when: current_active.stdout != ''
+
+- name: Wait for policy to reconcile on new active cluster
+  shell: |
+    oc get policy policy-virt-git-sync-cr -n {{ virtgitsync_policy_namespace }} -o json | \
+    jq -r '.status.status[] | select(.clustername=="{{ target_cluster }}") | .compliant'
+  environment: "{{ kubeconfig_env }}"
+  register: new_active_compliant
+  until: new_active_compliant.stdout == "Compliant"
+  retries: 10
+  delay: 30
+  changed_when: false
+  when: current_active.stdout != ''
+
+- name: Display failover completion
+  debug:
+    msg:
+      - "=========================================="
+      - "Failover Complete!"
+      - "=========================================="
+      - "Previous active cluster: {{ source_cluster }}"
+      - "New active cluster: {{ target_cluster }}"
+      - ""
+      - "VirtGitSync CR is now running on: {{ target_cluster }}"
+      - "VirtGitSync CR removed from: {{ source_cluster }}"
+      - ""
+      - "Both clusters still have the operator installed and ready"
+      - "=========================================="
+  when: current_active.stdout != ''

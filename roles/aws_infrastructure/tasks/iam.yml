@@ -35,3 +35,49 @@
     role: OpenShiftBastionRole
     state: present
   register: bastion_profile
+
+- name: Create IAM user for OpenShift installer credentials
+  amazon.aws.iam_user:
+    name: openshift-installer
+    state: present
+    tags:
+      Purpose: OpenShiftInstallation
+  register: installer_user
+
+- name: Attach installer policy to installer user
+  amazon.aws.iam_user:
+    name: openshift-installer
+    managed_policies:
+      - "{{ installer_policy.policy.arn }}"
+    state: present
+
+- name: Check if access keys already exist for installer user
+  amazon.aws.iam_access_key_info:
+    user_name: openshift-installer
+  register: existing_keys
+
+- name: Create access key for installer user
+  amazon.aws.iam_access_key:
+    user_name: openshift-installer
+    state: present
+  register: installer_access_key
+  when: existing_keys.access_keys | length == 0
+
+- name: Store access key credentials locally (temporary)
+  copy:
+    content: |
+      [default]
+      aws_access_key_id = {{ installer_access_key.access_key.access_key_id }}
+      aws_secret_access_key = {{ installer_access_key.secret_access_key }}
+    dest: /tmp/aws-installer-credentials
+    mode: '0600'
+  when: installer_access_key.changed
+  delegate_to: localhost
+
+- name: Display access key creation status
+  debug:
+    msg:
+      - "OpenShift Installer IAM User: {{ installer_user.user.user_name }}"
+      - "Access Key ID: {{ installer_access_key.access_key.access_key_id if installer_access_key.changed else 'Using existing key' }}"
+      - "Credentials will be configured on bastion in workspace setup"
+  when: installer_access_key is defined

@@ -1,0 +1,26 @@
+---
+- name: Create VMs repository in Gitea
+  uri:
+    url: "https://gitea-{{ gitea_namespace }}.apps.hub.{{ selected_base_domain }}/api/v1/user/repos"
+    method: POST
+    user: "{{ gitea_admin_user }}"
+    password: "{{ gitea_admin_password }}"
+    force_basic_auth: yes
+    body_format: json
+    body:
+      name: vms
+      description: "Virtual Machine definitions synchronized by virt-git-sync"
+      private: false
+      auto_init: true
+      default_branch: main
+      readme: Default
+    status_code: [201, 409]  # 201 = created, 409 = already exists
+    validate_certs: yes
+  register: gitea_repo_result
+  changed_when: gitea_repo_result.status == 201
+
+- name: Display Gitea repository status
+  debug:
+    msg:
+      - "Gitea repository: {{ 'created' if gitea_repo_result.status == 201 else 'already exists' }}"
+      - "Repository URL: https://gitea-{{ gitea_namespace }}.apps.hub.{{ selected_base_domain }}/{{ gitea_admin_user }}/vms"

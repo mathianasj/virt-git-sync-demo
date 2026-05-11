@@ -1,0 +1,255 @@
+---
+# SSH Key Validation and Management
+# Ensures local SSH keys exist, match, and are synchronized with AWS
+
+- name: Check if local SSH private key exists
+  stat:
+    path: "~/.ssh/{{ bastion_key_name }}"
+  register: local_private_key
+
+- name: Generate new SSH key pair locally if not exists
+  openssh_keypair:
+    path: "~/.ssh/{{ bastion_key_name }}"
+    type: rsa
+    size: 2048
+    comment: "{{ bastion_key_name }}"
+    force: no
+  when: not local_private_key.stat.exists
+  register: generated_key
+
+- name: Validate private key is readable
+  command: ssh-keygen -l -f ~/.ssh/{{ bastion_key_name }}
+  register: private_key_check
+  changed_when: false
+  failed_when: private_key_check.rc != 0
+
+- name: Extract public key from private key
+  command: ssh-keygen -y -f ~/.ssh/{{ bastion_key_name }}
+  register: extracted_public_key
+  changed_when: false
+
+- name: Check if public key file exists
+  stat:
+    path: "~/.ssh/{{ bastion_key_name }}.pub"
+  register: local_public_key_file
+
+- name: Read existing public key file if exists
+  slurp:
+    path: "~/.ssh/{{ bastion_key_name }}.pub"
+  register: existing_public_key
+  when: local_public_key_file.stat.exists
+
+- name: Validate public key matches private key
+  fail:
+    msg: "Public key file does not match private key. Regenerating public key."
+  when:
+    - local_public_key_file.stat.exists
+    - existing_public_key.content | b64decode | trim != extracted_public_key.stdout | trim
+  ignore_errors: yes
+  register: pubkey_mismatch
+
+- name: Regenerate public key file if mismatch
+  copy:
+    content: "{{ extracted_public_key.stdout }}\n"
+    dest: "~/.ssh/{{ bastion_key_name }}.pub"
+    mode: '0644'
+  when: pubkey_mismatch is failed or not local_public_key_file.stat.exists
+
+- name: Get local key fingerprint (AWS-compatible format for imported keys)
+  shell: ssh-keygen -f ~/.ssh/{{ bastion_key_name }}.pub -e -m PKCS8 | openssl pkey -pubin -outform DER | openssl md5 -c | awk -F'= ' '{print $2}'
+  register: local_key_fingerprint
+  changed_when: false
+
+- name: Set local fingerprint variable
+  set_fact:
+    local_fingerprint: "{{ local_key_fingerprint.stdout | trim }}"
+
+- name: Display local key fingerprint
+  debug:
+    msg:
+      - "Local SSH Key Validated:"
+      - "  Key: ~/.ssh/{{ bastion_key_name }}"
+      - "  Fingerprint: {{ local_fingerprint }}"
+
+- name: Check if AWS key pair exists
+  amazon.aws.ec2_key_info:
+    region: "{{ aws_region }}"
+    names:
+      - "{{ bastion_key_name }}"
+  register: aws_key_info
+
+- name: Set fingerprints match to false if no AWS key exists
+  set_fact:
+    fingerprints_match: false
+  when: aws_key_info.keypairs | length == 0
+
+- name: Compare fingerprints if AWS key exists
+  set_fact:
+    fingerprints_match: "{{ aws_key_info.keypairs[0].key_fingerprint == local_fingerprint }}"
+  when: aws_key_info.keypairs | length > 0
+
+- name: Display fingerprint comparison
+  debug:
+    msg:
+      - "AWS Key Pair Found:"
+      - "  AWS Fingerprint:   {{ aws_key_info.keypairs[0].key_fingerprint }}"
+      - "  Local Fingerprint: {{ local_fingerprint }}"
+      - "  Match: {{ fingerprints_match }}"
+  when: aws_key_info.keypairs | length > 0
+
+- name: Prompt user if fingerprints don't match
+  pause:
+    prompt: |
+
+      WARNING: AWS key pair fingerprint does not match local key!
+
+      AWS Fingerprint:   {{ aws_key_info.keypairs[0].key_fingerprint }}
+      Local Fingerprint: {{ local_fingerprint }}
+
+      This means the AWS key pair was generated differently than your local key.
+      We need to delete the AWS key pair and upload your local public key.
+
+      Do you want to continue? (yes/no)
+  register: fingerprint_mismatch_response
+  when:
+    - aws_key_info.keypairs | length > 0
+    - not (fingerprints_match | default(false))
+
+- name: Fail if user does not want to continue
+  fail:
+    msg: "User chose not to continue with key pair update"
+  when:
+    - fingerprint_mismatch_response is defined
+    - not fingerprint_mismatch_response.skipped | default(false)
+    - (fingerprint_mismatch_response.user_input | default('')) | lower != 'yes'
+
+- name: Delete AWS key pair if fingerprints don't match
+  amazon.aws.ec2_key:
+    name: "{{ bastion_key_name }}"
+    region: "{{ aws_region }}"
+    state: absent
+  when:
+    - aws_key_info.keypairs | length > 0
+    - not fingerprints_match
+
+- name: Upload local public key to AWS
+  amazon.aws.ec2_key:
+    name: "{{ bastion_key_name }}"
+    region: "{{ aws_region }}"
+    key_material: "{{ extracted_public_key.stdout }}"
+    state: present
+  when: aws_key_info.keypairs | length == 0 or not fingerprints_match
+
+- name: Verify AWS key pair was created/updated
+  amazon.aws.ec2_key_info:
+    region: "{{ aws_region }}"
+    names:
+      - "{{ bastion_key_name }}"
+  register: aws_key_verified
+
+- name: Confirm fingerprints now match
+  assert:
+    that:
+      - aws_key_verified.keypairs | length > 0
+      - aws_key_verified.keypairs[0].key_fingerprint == local_fingerprint
+    msg: "AWS key pair fingerprint still does not match after upload!"
+
+- name: Check for existing bastion instances
+  amazon.aws.ec2_instance_info:
+    region: "{{ aws_region }}"
+    filters:
+      "tag:Name": "{{ bastion_vpc.name }}-bastion"
+      "instance-state-name":
+        - running
+        - pending
+        - stopping
+        - stopped
+  register: existing_bastion
+
+- name: Get key name from existing bastion
+  set_fact:
+    bastion_key_name_used: "{{ existing_bastion.instances[0].key_name }}"
+  when: existing_bastion.instances | length > 0
+
+- name: Get fingerprint of key used by bastion
+  amazon.aws.ec2_key_info:
+    region: "{{ aws_region }}"
+    names:
+      - "{{ bastion_key_name_used }}"
+  register: bastion_key_info
+  when: existing_bastion.instances | length > 0
+
+- name: Check if bastion key matches our validated key
+  set_fact:
+    bastion_key_matches: "{{ bastion_key_info.keypairs[0].key_fingerprint == local_fingerprint }}"
+  when:
+    - existing_bastion.instances | length > 0
+    - bastion_key_info.keypairs | length > 0
+
+- name: Display bastion key mismatch warning
+  debug:
+    msg:
+      - "WARNING: Existing bastion instance found with mismatched SSH key!"
+      - "  Instance ID: {{ existing_bastion.instances[0].instance_id }}"
+      - "  Instance State: {{ existing_bastion.instances[0].state.name }}"
+      - "  Instance Key: {{ bastion_key_name_used }}"
+      - "  Instance Key Fingerprint: {{ bastion_key_info.keypairs[0].key_fingerprint }}"
+      - "  Our Validated Key: {{ bastion_key_name }}"
+      - "  Our Fingerprint: {{ local_fingerprint }}"
+      - ""
+      - "You will not be able to SSH into this instance with the current local key."
+  when:
+    - existing_bastion.instances | length > 0
+    - not (bastion_key_matches | default(false))
+
+- name: Prompt user to recreate bastion with correct key
+  pause:
+    prompt: |
+
+      Existing bastion instance {{ existing_bastion.instances[0].instance_id }} uses a different SSH key.
+      Current state: {{ existing_bastion.instances[0].state.name }}
+
+      The instance uses key: {{ bastion_key_name_used }} ({{ bastion_key_info.keypairs[0].key_fingerprint }})
+      Your validated key:    {{ bastion_key_name }} ({{ local_fingerprint }})
+
+      To proceed with deployment, we need to terminate and recreate the bastion instance.
+
+      Terminate and recreate bastion instance? (yes/no)
+  register: recreate_bastion_response
+  when:
+    - existing_bastion.instances | length > 0
+    - not (bastion_key_matches | default(false))
+
+- name: Terminate bastion with wrong key
+  amazon.aws.ec2_instance:
+    region: "{{ aws_region }}"
+    instance_ids:
+      - "{{ existing_bastion.instances[0].instance_id }}"
+    state: absent
+    wait: yes
+  when:
+    - recreate_bastion_response is defined
+    - not recreate_bastion_response.skipped | default(false)
+    - (recreate_bastion_response.user_input | default('')) | lower == 'yes'
+
+- name: Fail if user chose not to recreate bastion
+  fail:
+    msg: "Cannot proceed - bastion instance exists with incompatible SSH key and user chose not to recreate it"
+  when:
+    - recreate_bastion_response is defined
+    - not recreate_bastion_response.skipped | default(false)
+    - (recreate_bastion_response.user_input | default('')) | lower != 'yes'
+
+- name: SSH Key Validation Complete
+  debug:
+    msg:
+      - "=========================================="
+      - "SSH Key Validation Complete"
+      - "=========================================="
+      - "Local Private Key: ~/.ssh/{{ bastion_key_name }}"
+      - "Local Public Key:  ~/.ssh/{{ bastion_key_name }}.pub"
+      - "Key Fingerprint:   {{ local_fingerprint }}"
+      - "AWS Key Pair:      {{ bastion_key_name }}"
+      - "AWS Fingerprint:   {{ local_fingerprint }}"
+      - "Status:            ✓ All validated and synchronized"
+      - "=========================================="

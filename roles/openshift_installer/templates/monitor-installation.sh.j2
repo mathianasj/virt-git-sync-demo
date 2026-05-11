@@ -1,0 +1,131 @@
+#!/bin/bash
+set -e
+
+CLUSTER_NAME="{{ cluster_name }}"
+INSTALL_DIR="{{ install_dir }}"
+TMUX_SESSION="{{ tmux_session }}"
+KUBECONFIG="$INSTALL_DIR/auth/kubeconfig"
+INSTALL_LOG="$INSTALL_DIR/install.log"
+TIMEOUT={{ installation_timeout_minutes | default(90) | int }}
+
+echo "=========================================="
+echo "Monitoring $CLUSTER_NAME installation"
+echo "=========================================="
+
+# Check if installation already completed successfully
+if [ -f "$KUBECONFIG" ]; then
+  echo "Found existing kubeconfig at $KUBECONFIG"
+
+  # Verify kubeconfig is valid and cluster is accessible
+  if timeout 10 oc --kubeconfig="$KUBECONFIG" get nodes &>/dev/null; then
+    echo "✓ Cluster $CLUSTER_NAME is already installed and accessible"
+    echo "✓ Kubeconfig: $KUBECONFIG"
+
+    # Show cluster version
+    VERSION=$(oc --kubeconfig="$KUBECONFIG" version -o json 2>/dev/null | jq -r '.openshiftVersion // "unknown"' 2>/dev/null || echo "unknown")
+    echo "✓ OpenShift Version: $VERSION"
+
+    # Show node count
+    NODE_COUNT=$(oc --kubeconfig="$KUBECONFIG" get nodes --no-headers 2>/dev/null | wc -l || echo "0")
+    echo "✓ Nodes: $NODE_COUNT"
+
+    exit 0
+  else
+    echo "⚠ Kubeconfig exists but cluster not accessible (may still be booting)"
+    echo "  Continuing to monitor installation..."
+  fi
+fi
+
+# Check if installation completed but cluster not yet ready
+if [ -f "$INSTALL_LOG" ] && grep -q "Install complete!" "$INSTALL_LOG"; then
+  echo "✓ Installation log shows 'Install complete!'"
+
+  if [ -f "$KUBECONFIG" ]; then
+    echo "✓ Kubeconfig exists, waiting for cluster API to become available..."
+
+    # Wait up to 5 minutes for API to become available
+    for i in {1..30}; do
+      if timeout 10 oc --kubeconfig="$KUBECONFIG" get nodes &>/dev/null; then
+        echo "✓ Cluster API is now accessible"
+        exit 0
+      fi
+      echo "  Waiting for API (attempt $i/30)..."
+      sleep 10
+    done
+
+    echo "⚠ Installation complete but cluster API not accessible after 5 minutes"
+    echo "  This may be temporary - cluster might still be initializing"
+    exit 0
+  else
+    echo "✓ Installation marked complete in logs"
+    exit 0
+  fi
+fi
+
+# Monitor ongoing installation
+echo "Monitoring ongoing installation (timeout: $TIMEOUT minutes)..."
+ELAPSED=0
+
+while [ $ELAPSED -lt $TIMEOUT ]; do
+  # Check for completion
+  if [ -f "$INSTALL_LOG" ] && grep -q "Install complete!" "$INSTALL_LOG"; then
+    echo "✓ Installation completed!"
+
+    if [ -f "$KUBECONFIG" ]; then
+      echo "✓ Kubeconfig created"
+
+      # Quick accessibility check
+      if timeout 10 oc --kubeconfig="$KUBECONFIG" get nodes &>/dev/null; then
+        echo "✓ Cluster is accessible"
+      else
+        echo "⚠ Cluster not yet accessible (normal - may need a few minutes)"
+      fi
+    fi
+    exit 0
+  fi
+
+  # Get current output for monitoring
+  if tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
+    OUTPUT=$(tmux capture-pane -t "$TMUX_SESSION" -p | tail -50)
+  elif [ -f "$INSTALL_LOG" ]; then
+    OUTPUT=$(tail -100 "$INSTALL_LOG")
+  else
+    # No tmux and no log - installation hasn't started or was cleaned up
+    if [ -f "$KUBECONFIG" ]; then
+      echo "✓ Tmux session gone but kubeconfig exists - installation likely completed"
+      exit 0
+    else
+      echo "✗ No tmux session and no install.log found"
+      echo "  Installation directory: $INSTALL_DIR"
+      echo "  Expected tmux session: $TMUX_SESSION"
+      ls -la "$INSTALL_DIR" 2>/dev/null || echo "  Directory doesn't exist"
+      exit 1
+    fi
+  fi
+
+  # Check for fatal errors only (ignore normal retry warnings)
+  if echo "$OUTPUT" | grep -q "level=fatal"; then
+    echo "✗ Fatal error detected in installation"
+    echo "=========================================="
+    echo "Last 100 lines of install log:"
+    echo "=========================================="
+    tail -100 "$INSTALL_LOG" 2>/dev/null || echo "No log file available"
+    exit 1
+  fi
+
+  # Show progress indicator
+  if [ $((ELAPSED % 5)) -eq 0 ]; then
+    LAST_LINE=$(tail -1 "$INSTALL_LOG" 2>/dev/null | grep "level=" | cut -d' ' -f2- || echo "...")
+    echo "[${ELAPSED}m] $LAST_LINE"
+  fi
+
+  sleep 60
+  ELAPSED=$((ELAPSED + 1))
+done
+
+echo "✗ Installation timed out after $TIMEOUT minutes"
+echo "=========================================="
+echo "Last 50 lines of install log:"
+echo "=========================================="
+tail -50 "$INSTALL_LOG" 2>/dev/null || echo "No log file available"
+exit 1

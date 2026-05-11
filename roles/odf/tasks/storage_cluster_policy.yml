@@ -1,0 +1,328 @@
+---
+- name: Create ODF StorageCluster policy (both clusters)
+  kubernetes.core.k8s:
+    kubeconfig: "{{ hub_kubeconfig }}"
+    state: present
+    definition:
+      apiVersion: policy.open-cluster-management.io/v1
+      kind: Policy
+      metadata:
+        name: policy-odf-storage-cluster
+        namespace: "{{ odf_policy_namespace }}"
+        annotations:
+          policy.open-cluster-management.io/standards: NIST-CSF
+          policy.open-cluster-management.io/categories: CM Configuration Management
+          policy.open-cluster-management.io/controls: CM-2 Baseline Configuration
+      spec:
+        remediationAction: enforce
+        disabled: false
+        policy-templates:
+          - objectDefinition:
+              apiVersion: policy.open-cluster-management.io/v1
+              kind: ConfigurationPolicy
+              metadata:
+                name: policy-odf-storage-cluster
+              spec:
+                remediationAction: enforce
+                severity: high
+                object-templates:
+                  - complianceType: musthave
+                    objectDefinition:
+                      apiVersion: ocs.openshift.io/v1
+                      kind: StorageCluster
+                      metadata:
+                        name: ocs-storagecluster
+                        namespace: "{{ odf_namespace }}"
+                      spec:
+                        arbiter: {}
+                        encryption:
+                          kms: {}
+                        externalStorage: {}
+                        enableCephTools: true
+                        flexibleScaling: true
+                        resources:
+                          mds:
+                            limits:
+                              cpu: "1"
+                              memory: "4Gi"
+                            requests:
+                              cpu: "500m"
+                              memory: "2Gi"
+                          mon:
+                            limits:
+                              cpu: "1"
+                              memory: "2Gi"
+                            requests:
+                              cpu: "500m"
+                              memory: "1Gi"
+                          mgr:
+                            limits:
+                              cpu: "1"
+                              memory: "2Gi"
+                            requests:
+                              cpu: "500m"
+                              memory: "1Gi"
+                          noobaa-core:
+                            limits:
+                              cpu: "1"
+                              memory: "4Gi"
+                            requests:
+                              cpu: "500m"
+                              memory: "2Gi"
+                          noobaa-db:
+                            limits:
+                              cpu: "1"
+                              memory: "4Gi"
+                            requests:
+                              cpu: "500m"
+                              memory: "2Gi"
+                        managedResources:
+                          cephBlockPools: {}
+                          cephCluster: {}
+                          cephConfig: {}
+                          cephDashboard: {}
+                          cephFilesystems: {}
+                          cephObjectStoreUsers: {}
+                          cephObjectStores: {}
+                        mirroring: {}
+                        nodeTopologies: {}
+                        monDataDirHostPath: /var/lib/rook
+                        storageDeviceSets:
+                          - config: {}
+                            count: "{{ odf_storage_replicas }}"
+                            dataPVCTemplate:
+                              spec:
+                                accessModes:
+                                  - ReadWriteOnce
+                                resources:
+                                  requests:
+                                    storage: "{{ odf_storage_volume_size }}Gi"
+                                storageClassName: gp3-csi
+                                volumeMode: Block
+                            name: ocs-deviceset
+                            placement:
+                              nodeAffinity:
+                                requiredDuringSchedulingIgnoredDuringExecution:
+                                  nodeSelectorTerms:
+                                    - matchExpressions:
+                                        - key: cluster.ocs.openshift.io/openshift-storage
+                                          operator: Exists
+                              tolerations:
+                                - key: node.ocs.openshift.io/storage
+                                  operator: Equal
+                                  value: "true"
+                                  effect: NoSchedule
+                            portable: true
+                            preparePlacement: {}
+                            replica: 1
+                            resources: {}
+          - objectDefinition:
+              apiVersion: policy.open-cluster-management.io/v1
+              kind: ConfigurationPolicy
+              metadata:
+                name: policy-odf-disable-existing-defaults
+              spec:
+                remediationAction: enforce
+                severity: low
+                object-templates:
+                  - complianceType: musthave
+                    objectDefinition:
+                      apiVersion: storage.k8s.io/v1
+                      kind: StorageClass
+                      metadata:
+                        name: gp3-csi
+                        annotations:
+                          storageclass.kubernetes.io/is-default-class: "false"
+                  - complianceType: musthave
+                    objectDefinition:
+                      apiVersion: storage.k8s.io/v1
+                      kind: StorageClass
+                      metadata:
+                        name: gp2-csi
+                        annotations:
+                          storageclass.kubernetes.io/is-default-class: "false"
+          - objectDefinition:
+              apiVersion: policy.open-cluster-management.io/v1
+              kind: ConfigurationPolicy
+              metadata:
+                name: policy-odf-default-storageclass
+              spec:
+                remediationAction: inform
+                severity: low
+                object-templates:
+                  - complianceType: musthave
+                    objectDefinition:
+                      apiVersion: storage.k8s.io/v1
+                      kind: StorageClass
+                      metadata:
+                        name: ocs-storagecluster-ceph-rbd
+                        annotations:
+                          storageclass.kubernetes.io/is-default-class: "true"
+          - objectDefinition:
+              apiVersion: policy.open-cluster-management.io/v1
+              kind: ConfigurationPolicy
+              metadata:
+                name: policy-odf-console-plugin
+              spec:
+                remediationAction: inform
+                severity: low
+                object-templates:
+                  - complianceType: musthave
+                    objectDefinition:
+                      apiVersion: console.openshift.io/v1
+                      kind: ConsolePlugin
+                      metadata:
+                        name: odf-console
+                      spec:
+                        displayName: OpenShift Data Foundation
+                        backend:
+                          type: Service
+                          service:
+                            name: odf-console-service
+                            namespace: "{{ odf_namespace }}"
+                            port: 9001
+                            basePath: /
+
+- name: Create PlacementRule for StorageCluster (all clusters)
+  kubernetes.core.k8s:
+    kubeconfig: "{{ hub_kubeconfig }}"
+    state: present
+    definition:
+      apiVersion: apps.open-cluster-management.io/v1
+      kind: PlacementRule
+      metadata:
+        name: placement-odf-storage-cluster
+        namespace: "{{ odf_policy_namespace }}"
+      spec:
+        clusterSelector:
+          matchExpressions:
+            - key: vendor
+              operator: In
+              values:
+                - OpenShift
+
+- name: Create PlacementBinding for StorageCluster
+  kubernetes.core.k8s:
+    kubeconfig: "{{ hub_kubeconfig }}"
+    state: present
+    definition:
+      apiVersion: policy.open-cluster-management.io/v1
+      kind: PlacementBinding
+      metadata:
+        name: binding-odf-storage-cluster
+        namespace: "{{ odf_policy_namespace }}"
+      placementRef:
+        name: placement-odf-storage-cluster
+        kind: PlacementRule
+        apiGroup: apps.open-cluster-management.io
+      subjects:
+        - name: policy-odf-storage-cluster
+          kind: Policy
+          apiGroup: policy.open-cluster-management.io
+
+- name: Wait for StorageCluster policy compliance on both clusters
+  shell: |
+    oc get policy policy-odf-storage-cluster -n {{ odf_policy_namespace }} -o json | \
+    jq -r '.status.status[] | select(.compliant=="Compliant") | .clustername' | wc -l
+  environment:
+    KUBECONFIG: "{{ hub_kubeconfig }}"
+  register: storage_compliant_clusters
+  until: storage_compliant_clusters.stdout | int >= 2
+  retries: "{{ operator_timeout_minutes | int * 2 }}"
+  delay: 60
+  changed_when: false
+
+- name: Display StorageCluster policy compliance status
+  debug:
+    msg:
+      - "ODF StorageCluster policy compliance achieved"
+      - "Compliant clusters: {{ storage_compliant_clusters.stdout }}"
+      - "StorageCluster deployed on both clusters"
+      - ""
+      - "Configuration:"
+      - "  - Node placement: Only using {{ odf_storage_replicas }} labeled storage nodes per cluster"
+      - "  - Default storage class: ocs-storagecluster-ceph-rbd (ODF RBD)"
+      - "  - Existing defaults (gp3-csi, gp2-csi): Disabled"
+      - "  - Optimized for both regular workloads and OpenShift Virtualization"
+
+- name: Set managed cluster kubeconfig path
+  set_fact:
+    managed_kubeconfig: "{{ clusters[1].install_dir }}/auth/kubeconfig"
+
+- name: Wait for ODF StorageClasses to be created on hub cluster
+  shell: |
+    oc get storageclass ocs-storagecluster-ceph-rbd -o name
+  environment:
+    KUBECONFIG: "{{ hub_kubeconfig }}"
+  register: hub_sc_check
+  until: hub_sc_check.rc == 0
+  retries: 30
+  delay: 10
+  changed_when: false
+  failed_when: false
+
+- name: Wait for ODF StorageClasses to be created on managed cluster
+  shell: |
+    oc get storageclass ocs-storagecluster-ceph-rbd -o name
+  environment:
+    KUBECONFIG: "{{ managed_kubeconfig }}"
+  register: managed_sc_check
+  until: managed_sc_check.rc == 0
+  retries: 30
+  delay: 10
+  changed_when: false
+  failed_when: false
+
+- name: Set ODF as default StorageClass on hub cluster
+  shell: |
+    # Remove default from gp3-csi
+    oc annotate storageclass gp3-csi storageclass.kubernetes.io/is-default-class=false --overwrite
+    # Remove default from gp2-csi
+    oc annotate storageclass gp2-csi storageclass.kubernetes.io/is-default-class=false --overwrite 2>/dev/null || true
+    # Set ODF as default
+    oc annotate storageclass ocs-storagecluster-ceph-rbd storageclass.kubernetes.io/is-default-class=true --overwrite
+  environment:
+    KUBECONFIG: "{{ hub_kubeconfig }}"
+  register: hub_default_sc
+  changed_when: true
+
+- name: Set ODF as default StorageClass on managed cluster
+  shell: |
+    # Remove default from gp3-csi
+    oc annotate storageclass gp3-csi storageclass.kubernetes.io/is-default-class=false --overwrite
+    # Remove default from gp2-csi
+    oc annotate storageclass gp2-csi storageclass.kubernetes.io/is-default-class=false --overwrite 2>/dev/null || true
+    # Set ODF as default
+    oc annotate storageclass ocs-storagecluster-ceph-rbd storageclass.kubernetes.io/is-default-class=true --overwrite
+  environment:
+    KUBECONFIG: "{{ managed_kubeconfig }}"
+  register: managed_default_sc
+  changed_when: true
+
+- name: Enable ODF console plugin on hub cluster
+  shell: |
+    CURRENT_PLUGINS=$(oc get console.operator cluster -o jsonpath='{.spec.plugins}' | grep -o 'odf-console' || echo "")
+    if [ -z "$CURRENT_PLUGINS" ]; then
+      echo "Adding odf-console plugin"
+      oc patch console.operator cluster --type=json -p '[{"op":"add","path":"/spec/plugins/-","value":"odf-console"}]'
+    else
+      echo "odf-console plugin already enabled"
+    fi
+  environment:
+    KUBECONFIG: "{{ hub_kubeconfig }}"
+  register: hub_console_plugin
+  changed_when: "'Adding odf-console plugin' in hub_console_plugin.stdout"
+
+- name: Enable ODF console plugin on managed cluster
+  shell: |
+    CURRENT_PLUGINS=$(oc get console.operator cluster -o jsonpath='{.spec.plugins}' | grep -o 'odf-console' || echo "")
+    if [ -z "$CURRENT_PLUGINS" ]; then
+      echo "Adding odf-console plugin"
+      oc patch console.operator cluster --type=json -p '[{"op":"add","path":"/spec/plugins/-","value":"odf-console"}]'
+    else
+      echo "odf-console plugin already enabled"
+    fi
+  environment:
+    KUBECONFIG: "{{ managed_kubeconfig }}"
+  register: managed_console_plugin
+  changed_when: "'Adding odf-console plugin' in managed_console_plugin.stdout"

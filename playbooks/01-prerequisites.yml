@@ -8,6 +8,17 @@
       include_vars:
         file: "{{ playbook_dir }}/../group_vars/all.yml"
 
+    - name: Display phase timing information
+      debug:
+        msg:
+          - "=========================================="
+          - "Phase 1: Prerequisites Check"
+          - "=========================================="
+          - "Expected Runtime: 2-5 minutes"
+          - "Started: {{ ansible_date_time.time }}"
+          - "Estimated Completion: {{ '%02d:%02d' | format((ansible_date_time.hour | int + ((ansible_date_time.minute | int + 5) // 60)) % 24, (ansible_date_time.minute | int + 5) % 60) }}"
+          - "=========================================="
+
     - name: Check for AWS credentials
       command: aws sts get-caller-identity
       register: aws_identity
@@ -16,6 +27,26 @@
     - name: Display AWS identity
       debug:
         msg: "Using AWS Account: {{ (aws_identity.stdout | from_json).Account }}"
+
+    - name: Check if clusters are already deployed
+      shell: |
+        aws ec2 describe-instances \
+          --region {{ aws_region }} \
+          --filters "Name=tag:Name,Values=*{{ clusters[0].cluster_name }}*" "Name=instance-state-name,Values=running,stopped" \
+          --query 'Reservations[*].Instances[*].InstanceId' \
+          --output text | wc -w
+      register: existing_cluster_check
+      changed_when: false
+      failed_when: false
+
+    - name: Set cluster exists flag
+      set_fact:
+        clusters_exist: "{{ (existing_cluster_check.stdout | trim | int) > 0 }}"
+
+    - name: Display cluster status
+      debug:
+        msg: "Existing clusters detected - skipping quota checks"
+      when: clusters_exist | bool
 
     - name: Check Elastic IP quota and usage
       shell: |
@@ -27,22 +58,26 @@
       register: eip_quota_raw
       changed_when: false
       failed_when: false
+      when: not (clusters_exist | default(false) | bool)
 
     - name: Check current Elastic IP usage
       shell: |
         aws ec2 describe-addresses --region {{ aws_region }} --query 'length(Addresses)' --output text
       register: eip_usage_raw
       changed_when: false
+      when: not (clusters_exist | default(false) | bool)
 
     - name: Set EIP facts
       set_fact:
         eip_quota: "{{ eip_quota_raw.stdout | trim | int }}"
         eip_usage: "{{ eip_usage_raw.stdout | trim | int }}"
         eip_required: 8  # 3 NAT gateways + ~5 for two OpenShift clusters (LBs, etc.)
+      when: not (clusters_exist | default(false) | bool)
 
     - name: Calculate EIP availability
       set_fact:
         eip_available: "{{ (eip_quota | int) - (eip_usage | int) }}"
+      when: not (clusters_exist | default(false) | bool)
 
     - name: Check VPC quota
       shell: |
@@ -54,17 +89,20 @@
       register: vpc_quota_raw
       changed_when: false
       failed_when: false
+      when: not (clusters_exist | default(false) | bool)
 
     - name: Check current VPC usage
       shell: |
         aws ec2 describe-vpcs --region {{ aws_region }} --query 'length(Vpcs)' --output text
       register: vpc_usage_raw
       changed_when: false
+      when: not (clusters_exist | default(false) | bool)
 
     - name: Set VPC facts
       set_fact:
         vpc_quota: "{{ vpc_quota_raw.stdout | trim | int }}"
         vpc_usage: "{{ vpc_usage_raw.stdout | trim | int }}"
+      when: not (clusters_exist | default(false) | bool)
 
     - name: Display quota information
       debug:
@@ -73,6 +111,7 @@
           - "  Elastic IPs: {{ eip_usage }}/{{ eip_quota }} used (need ~{{ eip_required }} for deployment)"
           - "  VPCs: {{ vpc_usage }}/{{ vpc_quota }} used (need 1 for deployment)"
           - "  Available EIPs: {{ eip_available }}"
+      when: not (clusters_exist | default(false) | bool)
 
     - name: Warn if EIP quota may be insufficient
       debug:
@@ -98,7 +137,9 @@
           - ""
           - "Or deploy clusters to different regions (see group_vars/all.yml)"
           - "=========================================="
-      when: (eip_available | int) < (eip_required | int)
+      when:
+        - not (clusters_exist | default(false) | bool)
+        - (eip_available | int) < (eip_required | int)
 
     - name: Prompt for action when quota insufficient
       pause:
@@ -118,7 +159,9 @@
 
           Enter your choice (1-4)
       register: quota_action
-      when: (eip_available | int) < (eip_required | int)
+      when:
+        - not (clusters_exist | default(false) | bool)
+        - (eip_available | int) < (eip_required | int)
 
     - name: Request Elastic IP quota increase
       shell: |
@@ -130,6 +173,7 @@
           --output json
       register: quota_request
       when:
+        - not (clusters_exist | default(false) | bool)
         - (eip_available | int) < (eip_required | int)
         - quota_action.user_input | default('4') in ['1', '2']
       failed_when: false
@@ -142,6 +186,7 @@
           - "Status: {{ (quota_request.stdout | from_json).RequestedQuota.Status | default('N/A') }}"
           - "Desired value: 15 EIPs"
       when:
+        - not (clusters_exist | default(false) | bool)
         - (eip_available | int) < (eip_required | int)
         - quota_action.user_input | default('4') in ['1', '2']
         - quota_request.rc == 0
@@ -153,6 +198,7 @@
           - "Error: {{ quota_request.stderr | default('Unknown error') }}"
           - "You may need to request via AWS Console or Support"
       when:
+        - not (clusters_exist | default(false) | bool)
         - (eip_available | int) < (eip_required | int)
         - quota_action.user_input | default('4') in ['1', '2']
         - quota_request.rc != 0
@@ -206,6 +252,7 @@
             msg: "New Elastic IP quota: {{ eip_quota_updated.stdout }}"
 
       when:
+        - not (clusters_exist | default(false) | bool)
         - (eip_available | int) < (eip_required | int)
         - quota_action.user_input | default('4') == '1'
         - quota_request.rc == 0
@@ -214,6 +261,7 @@
       fail:
         msg: "Deployment cancelled by user due to quota concerns"
       when:
+        - not (clusters_exist | default(false) | bool)
         - (eip_available | int) < (eip_required | int)
         - quota_action.user_input | default('4') not in ['1', '2', '3']
 

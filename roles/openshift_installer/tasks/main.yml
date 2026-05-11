@@ -10,16 +10,3 @@
 
 - name: Include tmux check tasks
   include_tasks: tmux_check.yml
-
-- name: Include installation monitoring tasks
-  include_tasks: monitor_install.yml
-
-- name: Update state file with cluster status
-  shell: |
-    jq '.clusters["{{ cluster_name }}"] = {
-      "status": "complete",
-      "install_dir": "{{ install_dir }}",
-      "completed_at": "{{ ansible_date_time.iso8601 }}"
-    }' {{ state_file }} > {{ state_file }}.tmp && mv {{ state_file }}.tmp {{ state_file }}
-  args:
-    executable: /bin/bash

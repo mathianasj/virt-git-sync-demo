@@ -10,13 +10,16 @@
 - name: Include MultiClusterHub installation tasks
   include_tasks: multiclusterhub.yml
 
-- name: Get ACM route
+- name: Get OpenShift console route (ACM is integrated)
   shell: |
-    oc get route multicloud-console -n {{ acm_namespace }} -o jsonpath='{.spec.host}'
+    oc get route console -n openshift-console -o jsonpath='{.spec.host}'
   environment: "{{ kubeconfig_env }}"
-  register: acm_route
+  register: console_route
   changed_when: false
 
 - name: Display ACM console URL
   debug:
-    msg: "ACM Console URL: https://{{ acm_route.stdout }}"
+    msg:
+      - "ACM is integrated with the OpenShift console"
+      - "OpenShift Console URL: https://{{ console_route.stdout }}"
+      - "Navigate to 'All Clusters' in the OpenShift console to access ACM"

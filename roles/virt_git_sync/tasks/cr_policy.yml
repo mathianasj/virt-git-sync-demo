@@ -1,0 +1,125 @@
+---
+- name: Label hub cluster as active for VirtGitSync
+  kubernetes.core.k8s:
+    kubeconfig: "{{ hub_kubeconfig }}"
+    state: present
+    definition:
+      apiVersion: cluster.open-cluster-management.io/v1
+      kind: ManagedCluster
+      metadata:
+        name: local-cluster
+        labels:
+          virtgitsync-active: "true"
+
+- name: Create virt-git-sync CR policy (active cluster only)
+  kubernetes.core.k8s:
+    kubeconfig: "{{ hub_kubeconfig }}"
+    state: present
+    definition:
+      apiVersion: policy.open-cluster-management.io/v1
+      kind: Policy
+      metadata:
+        name: policy-virt-git-sync-cr
+        namespace: "{{ virtgitsync_policy_namespace }}"
+        annotations:
+          policy.open-cluster-management.io/standards: NIST-CSF
+          policy.open-cluster-management.io/categories: CM Configuration Management
+          policy.open-cluster-management.io/controls: CM-2 Baseline Configuration
+      spec:
+        remediationAction: enforce
+        disabled: false
+        policy-templates:
+          - objectDefinition:
+              apiVersion: policy.open-cluster-management.io/v1
+              kind: ConfigurationPolicy
+              metadata:
+                name: policy-virt-git-sync-cr-instance
+              spec:
+                remediationAction: enforce
+                severity: high
+                object-templates:
+                  - complianceType: musthave
+                    objectDefinition:
+                      apiVersion: virt.mathianasj.github.com/v1alpha1
+                      kind: VirtGitSync
+                      metadata:
+                        name: vm-git-sync
+                        namespace: "{{ virtgitsync_namespace }}"
+                      spec:
+                        gitRepository:
+                          url: "https://gitea-{{ gitea_namespace }}.apps.hub.{{ selected_base_domain }}/{{ gitea_admin_user }}/vms.git"
+                          branch: main
+                          secretRef:
+                            name: gitea-credentials
+                        syncPath: vms
+
+- name: Create PlacementRule for CR (active cluster only)
+  kubernetes.core.k8s:
+    kubeconfig: "{{ hub_kubeconfig }}"
+    state: present
+    definition:
+      apiVersion: apps.open-cluster-management.io/v1
+      kind: PlacementRule
+      metadata:
+        name: placement-virt-git-sync-cr
+        namespace: "{{ virtgitsync_policy_namespace }}"
+      spec:
+        clusterSelector:
+          matchExpressions:
+            - key: virtgitsync-active
+              operator: In
+              values:
+                - "true"
+
+- name: Create PlacementBinding for CR
+  kubernetes.core.k8s:
+    kubeconfig: "{{ hub_kubeconfig }}"
+    state: present
+    definition:
+      apiVersion: policy.open-cluster-management.io/v1
+      kind: PlacementBinding
+      metadata:
+        name: binding-virt-git-sync-cr
+        namespace: "{{ virtgitsync_policy_namespace }}"
+      placementRef:
+        name: placement-virt-git-sync-cr
+        kind: PlacementRule
+        apiGroup: apps.open-cluster-management.io
+      subjects:
+        - name: policy-virt-git-sync-cr
+          kind: Policy
+          apiGroup: policy.open-cluster-management.io
+
+- name: Wait for CR policy compliance on active cluster
+  shell: |
+    oc get policy policy-virt-git-sync-cr -n {{ virtgitsync_policy_namespace }} -o json | \
+    jq -r '.status.status[] | select(.compliant=="Compliant") | .clustername' | wc -l
+  environment: "{{ kubeconfig_env }}"
+  register: cr_compliant_clusters
+  until: cr_compliant_clusters.stdout | int >= 1
+  retries: "{{ operator_timeout_minutes | int }}"
+  delay: 60
+  changed_when: false
+
+- name: Get active cluster name
+  shell: |
+    oc get policy policy-virt-git-sync-cr -n {{ virtgitsync_policy_namespace }} -o json | \
+    jq -r '.status.status[] | select(.compliant=="Compliant") | .clustername'
+  environment: "{{ kubeconfig_env }}"
+  register: active_cluster
+  changed_when: false
+
+- name: Display CR policy compliance status
+  debug:
+    msg:
+      - "virt-git-sync CR policy compliance achieved"
+      - "Active cluster: {{ active_cluster.stdout }}"
+      - "VirtGitSync CR deployed to active cluster only"
+      - ""
+      - "DR Failover Instructions:"
+      - "  1. To failover to managed cluster:"
+      - "     oc label managedcluster local-cluster virtgitsync-active-"
+      - "     oc label managedcluster managed virtgitsync-active=true"
+      - "  2. To failover back to hub cluster:"
+      - "     oc label managedcluster managed virtgitsync-active-"
+      - "     oc label managedcluster local-cluster virtgitsync-active=true"

@@ -1,0 +1,158 @@
+---
+# Identify subnets containing bare metal worker nodes (c5.metal instances)
+# This allows us to target only worker subnet route tables for BGP router routing
+
+- name: Query AWS for bare metal worker instances in cluster
+  shell: |
+    aws ec2 describe-instances \
+      --region {{ aws_region }} \
+      --filters \
+        "Name=instance-type,Values={{ worker_instance_type | default('c5.metal') }}" \
+        "Name=instance-state-name,Values=running" \
+        "Name=vpc-id,Values={{ cluster_vpc_id }}" \
+      --query 'Reservations[*].Instances[*].[InstanceId,SubnetId,PrivateIpAddress,Tags[?Key==`Name`].Value|[0]]' \
+      --output json
+  register: worker_instances_raw
+  changed_when: false
+
+- name: Parse worker instance information
+  set_fact:
+    worker_instances: "{{ worker_instances_raw.stdout | from_json | flatten | batch(4) | list }}"
+
+- name: Get router's subnet ID to exclude from updates
+  shell: |
+    aws ec2 describe-instances \
+      --region {{ aws_region }} \
+      --instance-ids {{ router_instance_id }} \
+      --query 'Reservations[0].Instances[0].SubnetId' \
+      --output text
+  register: router_subnet_result
+  changed_when: false
+
+- name: Set router subnet ID
+  set_fact:
+    router_subnet_id: "{{ router_subnet_result.stdout }}"
+
+- name: Extract unique worker subnet IDs (excluding router subnet)
+  set_fact:
+    all_worker_subnet_ids: "{{ worker_instances | map(attribute=1) | unique | list }}"
+    worker_subnet_ids: "{{ worker_instances | map(attribute=1) | unique | list | difference([router_subnet_id]) }}"
+    worker_instance_details: |
+      {% set instances = [] %}
+      {% for instance in worker_instances %}
+      {% set _ = instances.append({
+        'instance_id': instance[0],
+        'subnet_id': instance[1],
+        'private_ip': instance[2],
+        'name': instance[3]
+      }) %}
+      {% endfor %}
+      {{ instances }}
+
+- name: Display subnet exclusion info
+  debug:
+    msg:
+      - "Router Subnet (excluded from route updates): {{ router_subnet_id }}"
+      - "Worker Subnets (will be updated): {{ worker_subnet_ids }}"
+      - "{{ 'NOTICE: Router is in worker subnet - its route table will NOT be modified to prevent routing loop' if router_subnet_id in all_worker_subnet_ids else 'Router is in separate subnet' }}"
+
+- name: Display discovered worker nodes and subnets
+  debug:
+    msg:
+      - "=========================================="
+      - "Worker Node Discovery - {{ cluster_name }}"
+      - "=========================================="
+      - "Worker Instance Type: {{ worker_instance_type | default('c5.metal') }}"
+      - "VPC ID: {{ cluster_vpc_id }}"
+      - "Total Workers Found: {{ worker_instances | length }}"
+      - "Unique Subnets: {{ worker_subnet_ids | length }}"
+      - ""
+      - "Worker Nodes:"
+      - "{% for instance in worker_instance_details %}- {{ instance.name }} ({{ instance.instance_id }}), Subnet: {{ instance.subnet_id }}, IP: {{ instance.private_ip }}{% endfor %}"
+      - ""
+      - "Worker Subnet IDs:"
+      - "{% for subnet in worker_subnet_ids %}- {{ subnet }}{% endfor %}"
+
+- name: Check if router is co-located with all workers
+  set_fact:
+    router_colocated_with_workers: "{{ (all_worker_subnet_ids | length > 0) and (worker_subnet_ids | length == 0) }}"
+    skip_route_updates: "{{ (all_worker_subnet_ids | length > 0) and (worker_subnet_ids | length == 0) }}"
+
+- name: Display routing configuration status
+  debug:
+    msg:
+      - "=========================================="
+      - "Routing Configuration Status"
+      - "=========================================="
+      - "Router Subnet: {{ router_subnet_id }}"
+      - "All Worker Subnets: {{ all_worker_subnet_ids }}"
+      - "Worker Subnets for Route Update: {{ worker_subnet_ids }}"
+      - ""
+      - "{{ 'NOTICE: Router is co-located with all workers in the same subnet.' if router_colocated_with_workers else 'Router is in a separate subnet from workers.' }}"
+      - "{{ 'Route table updates will be SKIPPED to prevent routing loop.' if skip_route_updates else 'Route tables will be updated to route via BGP router.' }}"
+      - "{{ 'Workers already have direct internet access via their existing route table.' if skip_route_updates else '' }}"
+
+- name: Verify at least one worker found (even if route update skipped)
+  assert:
+    that:
+      - all_worker_subnet_ids | length > 0
+    fail_msg: |
+      No worker subnets found for cluster {{ cluster_name }}!
+
+      Checked for:
+        Instance Type: {{ worker_instance_type | default('c5.metal') }}
+        VPC ID: {{ cluster_vpc_id }}
+        State: running
+
+      Verify that:
+        1. Worker nodes are deployed and running
+        2. Worker nodes are in the expected VPC
+    success_msg: "Found {{ all_worker_subnet_ids | length }} worker subnet(s) in {{ cluster_name }}"
+
+- name: Get route table IDs for worker subnets
+  shell: |
+    aws ec2 describe-route-tables \
+      --region {{ aws_region }} \
+      --filters "Name=association.subnet-id,Values={{ item }}" \
+      --query 'RouteTables[0].[RouteTableId,VpcId,Tags[?Key==`Name`].Value|[0]]' \
+      --output json
+  loop: "{{ worker_subnet_ids }}"
+  register: worker_route_tables_raw
+  changed_when: false
+  when: worker_subnet_ids | length > 0
+
+- name: Parse worker route table information
+  set_fact:
+    worker_route_tables: |
+      {% set route_tables = [] %}
+      {% if worker_route_tables_raw is defined and worker_route_tables_raw.results is defined %}
+      {% for result in worker_route_tables_raw.results %}
+      {% set rt_data = result.stdout | from_json %}
+      {% if rt_data and rt_data | length > 0 %}
+      {% set _ = route_tables.append({
+        'subnet_id': result.item,
+        'route_table_id': rt_data[0],
+        'vpc_id': rt_data[1],
+        'name': rt_data[2] if rt_data | length > 2 else 'N/A'
+      }) %}
+      {% endif %}
+      {% endfor %}
+      {% endif %}
+      {{ route_tables }}
+
+- name: Display worker route table mapping
+  debug:
+    msg:
+      - "Worker Route Tables:"
+      - "{% if worker_route_tables | length > 0 %}{% for rt in worker_route_tables %}- Subnet {{ rt.subnet_id }} → Route Table {{ rt.route_table_id }} ({{ rt.name }}){% endfor %}{% else %}- None (route updates will be skipped){% endif %}"
+
+- name: Verify all worker subnets have route tables
+  assert:
+    that:
+      - worker_route_tables | length == worker_subnet_ids | length
+    fail_msg: |
+      Not all worker subnets have associated route tables!
+      Expected: {{ worker_subnet_ids | length }}
+      Found: {{ worker_route_tables | length }}
+    success_msg: "All {{ worker_subnet_ids | length }} worker subnet(s) have route tables"
+  when: worker_subnet_ids | length > 0

@@ -1,0 +1,92 @@
+---
+- name: Create NMState operator subscription
+  shell: |
+    cat <<'EOF' | oc apply -f -
+    {{ lookup('template', 'nmstate-operator-subscription.yaml.j2') }}
+    EOF
+  environment:
+    KUBECONFIG: "{{ clusters[0].install_dir }}/auth/kubeconfig"
+  register: nmstate_operator_install
+  changed_when: "'created' in nmstate_operator_install.stdout or 'configured' in nmstate_operator_install.stdout"
+
+- name: Wait for NMState operator deployment to be ready
+  shell: |
+    oc wait --for=condition=Available \
+      --timeout=300s \
+      deployment/nmstate-operator \
+      -n {{ nmstate_operator_namespace }}
+  environment:
+    KUBECONFIG: "{{ clusters[0].install_dir }}/auth/kubeconfig"
+  register: operator_ready
+  retries: 10
+  delay: 30
+  until: operator_ready.rc == 0
+  changed_when: false
+
+- name: Wait for NMState CRD to be available
+  shell: |
+    oc get crd nmstates.nmstate.io
+  environment:
+    KUBECONFIG: "{{ clusters[0].install_dir }}/auth/kubeconfig"
+  register: nmstate_crd
+  retries: 20
+  delay: 15
+  until: nmstate_crd.rc == 0
+  changed_when: false
+
+- name: Create NMState instance
+  shell: |
+    cat <<'EOF' | oc apply -f -
+    apiVersion: nmstate.io/v1
+    kind: NMState
+    metadata:
+      name: nmstate
+      namespace: {{ nmstate_operator_namespace }}
+    spec: {}
+    EOF
+  environment:
+    KUBECONFIG: "{{ clusters[0].install_dir }}/auth/kubeconfig"
+  register: nmstate_instance_create
+  changed_when: "'created' in nmstate_instance_create.stdout or 'configured' in nmstate_instance_create.stdout"
+
+- name: Wait for nmstate-handler DaemonSet to be ready
+  shell: |
+    DESIRED=$(oc get daemonset nmstate-handler -n {{ nmstate_operator_namespace }} -o jsonpath='{.status.desiredNumberScheduled}')
+    READY=$(oc get daemonset nmstate-handler -n {{ nmstate_operator_namespace }} -o jsonpath='{.status.numberReady}')
+    if [ "$DESIRED" == "$READY" ] && [ "$READY" -gt 0 ]; then
+      echo "DaemonSet ready: $READY/$DESIRED pods"
+      exit 0
+    else
+      echo "DaemonSet not ready: $READY/$DESIRED pods"
+      exit 1
+    fi
+  environment:
+    KUBECONFIG: "{{ clusters[0].install_dir }}/auth/kubeconfig"
+  register: nmstate_ready
+  retries: 20
+  delay: 15
+  until: nmstate_ready.rc == 0
+  changed_when: false
+
+- name: Verify nmstate-handler DaemonSet is running
+  shell: |
+    oc get daemonset nmstate-handler \
+      -n {{ nmstate_operator_namespace }} \
+      -o jsonpath='{.status.numberReady}/{.status.desiredNumberScheduled}'
+  environment:
+    KUBECONFIG: "{{ clusters[0].install_dir }}/auth/kubeconfig"
+  register: nmstate_handler_status
+  changed_when: false
+
+- name: Display NMState handler status
+  debug:
+    msg:
+      - "=========================================="
+      - "NMState Operator Installation Complete"
+      - "=========================================="
+      - "Namespace: {{ nmstate_operator_namespace }}"
+      - "Operator Status: {{ operator_ready.stdout if operator_ready.rc == 0 else 'Waiting' }}"
+      - "NMState Instance Status: {{ nmstate_ready.stdout if nmstate_ready.rc == 0 else 'Waiting' }}"
+      - "Handler Pods Ready: {{ nmstate_handler_status.stdout }}"
+      - ""
+      - "NodeNetworkConfigurationPolicy CRD is now available!"

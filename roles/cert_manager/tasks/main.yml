@@ -1,0 +1,33 @@
+---
+- name: Set kubeconfig environment
+  set_fact:
+    kubeconfig_env:
+      KUBECONFIG: "{{ kubeconfig_path }}"
+
+- name: Include IAM setup tasks (run once)
+  include_tasks: iam.yml
+  run_once: true
+
+- name: Include operator installation tasks
+  include_tasks: operator.yml
+
+- name: Include credentials setup tasks
+  include_tasks: credentials.yml
+
+- name: Include ClusterIssuer setup tasks
+  include_tasks: issuer.yml
+
+- name: Include certificate creation tasks
+  include_tasks: certificate.yml
+
+- name: Include IngressController integration tasks
+  include_tasks: ingress_controller.yml
+
+- name: Display cert-manager deployment status
+  debug:
+    msg:
+      - "cert-manager deployed successfully"
+      - "ClusterIssuer: letsencrypt-prod"
+      - "Certificate: wildcard-apps-cert (*.apps.{{ cluster_config.cluster_name }}.{{ cluster_config.base_domain }})"
+      - "IngressController: Updated to use cert-manager certificate"
+      - "All Routes will now use the Let's Encrypt certificate"

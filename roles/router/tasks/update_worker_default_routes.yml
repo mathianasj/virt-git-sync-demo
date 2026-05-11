@@ -1,0 +1,115 @@
+---
+# Update worker node default routes to point to BGP router instead of AWS gateway
+# This is required for internet traffic from VMs to flow through the BGP router
+
+- name: Get router private IP for hub cluster
+  set_fact:
+    hub_router_ip: "{{ hub_router_instance.instances[0].private_ip_address }}"
+  when: hub_router_instance is defined and hub_router_instance.instances | length > 0
+
+- name: Get router private IP for managed cluster
+  set_fact:
+    managed_router_ip: "{{ managed_router_instance.instances[0].private_ip_address }}"
+  when: managed_router_instance is defined and managed_router_instance.instances | length > 0
+
+- name: Create MachineConfig to override default route for hub c5.metal workers
+  when: hub_router_ip is defined
+  block:
+    - name: Create temporary directory for MachineConfig
+      tempfile:
+        state: directory
+        suffix: machineconfig
+      register: temp_dir
+
+    - name: Create NetworkManager dispatcher script
+      copy:
+        dest: "{{ temp_dir.path }}/99-override-default-route.sh"
+        mode: '0755'
+        content: |
+          #!/bin/bash
+          # Override DHCP default route with BGP router
+          ROUTER_IP="{{ hub_router_ip }}"
+          INTERFACE="br-ex"
+
+          if [ "$1" = "$INTERFACE" ] && [ "$2" = "dhcp4-change" ]; then
+              # Remove DHCP default route
+              ip route del default dev $INTERFACE || true
+              # Add default route via BGP router
+              ip route add default via $ROUTER_IP dev $INTERFACE metric 100
+          fi
+
+    - name: Base64 encode the dispatcher script
+      shell: base64 -w 0 {{ temp_dir.path }}/99-override-default-route.sh
+      register: dispatcher_script_b64
+
+    - name: Create MachineConfig YAML
+      copy:
+        dest: "{{ temp_dir.path }}/machineconfig-bgp-route.yaml"
+        content: |
+          apiVersion: machineconfiguration.openshift.io/v1
+          kind: MachineConfig
+          metadata:
+            labels:
+              machineconfiguration.openshift.io/role: worker
+            name: 99-worker-bgp-default-route
+          spec:
+            config:
+              ignition:
+                version: 3.2.0
+              storage:
+                files:
+                  - path: /etc/NetworkManager/dispatcher.d/99-override-default-route.sh
+                    mode: 0755
+                    contents:
+                      source: data:text/plain;charset=utf-8;base64,{{ dispatcher_script_b64.stdout }}
+              systemd:
+                units:
+                  - name: apply-bgp-route.service
+                    enabled: true
+                    contents: |
+                      [Unit]
+                      Description=Apply BGP router as default gateway
+                      After=network-online.target
+                      Wants=network-online.target
+
+                      [Service]
+                      Type=oneshot
+                      ExecStart=/bin/bash -c 'sleep 10 && ip route del default via 10.0.11.1 dev br-ex || true && ip route add default via {{ hub_router_ip }} dev br-ex metric 100'
+                      RemainAfterExit=yes
+
+                      [Install]
+                      WantedBy=multi-user.target
+
+    - name: Apply MachineConfig to hub cluster
+      shell: |
+        export KUBECONFIG={{ lookup('env', 'HOME') }}/cluster-hub/auth/kubeconfig
+        oc apply -f {{ temp_dir.path }}/machineconfig-bgp-route.yaml
+      args:
+        executable: /bin/bash
+      delegate_to: "{{ bastion_public_ip }}"
+      become: true
+      become_user: ec2-user
+
+    - name: Wait for MachineConfig to be applied (this may take several minutes)
+      shell: |
+        export KUBECONFIG={{ lookup('env', 'HOME') }}/cluster-hub/auth/kubeconfig
+        oc wait mcp/worker --for condition=updated --timeout=600s
+      args:
+        executable: /bin/bash
+      delegate_to: "{{ bastion_public_ip }}"
+      become: true
+      become_user: ec2-user
+      register: mcp_wait
+      failed_when: false
+
+    - name: Clean up temporary directory
+      file:
+        path: "{{ temp_dir.path }}"
+        state: absent
+
+- name: Display route update status
+  debug:
+    msg:
+      - "MachineConfig applied to update default routes"
+      - "Hub workers will now route internet traffic via {{ hub_router_ip }}"
+      - "Note: Nodes will reboot to apply the configuration"

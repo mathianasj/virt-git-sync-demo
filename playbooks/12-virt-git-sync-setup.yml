@@ -1,0 +1,119 @@
+---
+- name: Gather bastion information
+  hosts: localhost
+  gather_facts: no
+  become: no
+  vars_files:
+    - /tmp/selected-domain.yml
+  tasks:
+    - name: Load global variables
+      include_vars:
+        file: "{{ playbook_dir }}/../group_vars/all.yml"
+
+    - name: Display phase timing information
+      debug:
+        msg:
+          - "=========================================="
+          - "Phase 12: Virt-Git-Sync Setup"
+          - "=========================================="
+          - "Expected Runtime: 3-5 minutes"
+          - "Started: {{ ansible_date_time.time }}"
+          - "Estimated Completion: {{ '%02d:%02d' | format((ansible_date_time.hour | int + ((ansible_date_time.minute | int + 5) // 60)) % 24, (ansible_date_time.minute | int + 5) % 60) }}"
+          - "=========================================="
+
+    - name: Get bastion public IP from AWS
+      shell: |
+        aws ec2 describe-instances \
+          --region {{ aws_region }} \
+          --filters "Name=tag:Role,Values=bastion" "Name=instance-state-name,Values=running" \
+          --query 'Reservations[0].Instances[0].PublicIpAddress' \
+          --output text
+      register: bastion_ip_result
+      changed_when: false
+
+    - name: Add bastion to inventory
+      add_host:
+        name: bastion_host
+        groups: bastion_dynamic
+        ansible_host: "{{ bastion_ip_result.stdout }}"
+        ansible_user: "{{ bastion_user }}"
+        ansible_ssh_private_key_file: "~/.ssh/{{ bastion_key_name }}"
+        ansible_ssh_common_args: "-o StrictHostKeyChecking=no"
+        ansible_python_interpreter: /usr/bin/python3
+
+- name: Phase 11 - virt-git-sync Operator Deployment via ACM
+  hosts: bastion_dynamic
+  gather_facts: no
+  become: no
+  vars_files:
+    - /tmp/selected-domain.yml
+  pre_tasks:
+    - name: Load global variables
+      include_vars:
+        file: "{{ playbook_dir }}/../group_vars/all.yml"
+
+    - name: Update clusters configuration with selected domain
+      set_fact:
+        clusters: |
+          {% set updated_clusters = [] %}
+          {% for cluster in clusters %}
+          {% set _ = cluster.update({'base_domain': selected_base_domain}) %}
+          {% set _ = updated_clusters.append(cluster) %}
+          {% endfor %}
+          {{ updated_clusters }}
+  vars:
+    hub_cluster: "{{ clusters[0] }}"
+
+  tasks:
+    - name: Display virt-git-sync deployment overview
+      debug:
+        msg:
+          - "=========================================="
+          - "virt-git-sync Operator Deployment"
+          - "=========================================="
+          - "Deploying virt-git-sync operator to all clusters"
+          - "  - Operator: {{ virtgitsync_operator_name }}"
+          - "  - Channel: {{ virtgitsync_operator_channel }}"
+          - "  - Source: {{ virtgitsync_operator_source }}"
+          - "  - Namespace: {{ virtgitsync_namespace }}"
+          - ""
+          - "Gitea Integration:"
+          - "  - Gitea URL: https://gitea-{{ gitea_namespace }}.apps.hub.{{ selected_base_domain }}"
+          - "  - Admin user: {{ gitea_admin_user }}"
+          - "  - Secret: gitea-credentials"
+          - "=========================================="
+
+    - name: Deploy virt-git-sync operator policy
+      include_role:
+        name: virt_git_sync
+      vars:
+        hub_kubeconfig: "{{ hub_cluster.install_dir }}/auth/kubeconfig"
+
+  post_tasks:
+    - name: Display virt-git-sync deployment status
+      debug:
+        msg:
+          - "=========================================="
+          - "virt-git-sync Operator Deployed"
+          - "=========================================="
+          - "Target clusters: Both hub and managed"
+          - "Operator namespace: {{ virtgitsync_namespace }}"
+          - "Policy namespace: {{ virtgitsync_policy_namespace }}"
+          - ""
+          - "Gitea Repository:"
+          - "  URL: https://gitea-{{ gitea_namespace }}.apps.hub.{{ selected_base_domain }}/{{ gitea_admin_user }}/vms"
+          - ""
+          - "VirtGitSync CR:"
+          - "  Name: vm-git-sync"
+          - "  Created on both hub and managed clusters"
+          - ""
+          - "Verification:"
+          - "  1. Check VirtGitSync status:"
+          - "     oc get virtgitsyncs -n {{ virtgitsync_namespace }}"
+          - "  2. View VirtGitSync details:"
+          - "     oc describe virtgitsyncs vm-git-sync -n {{ virtgitsync_namespace }}"
+          - "  3. Check operator logs:"
+          - "     oc logs -n {{ virtgitsync_namespace }} -l control-plane=controller-manager"
+          - "  4. Access Gitea repository:"
+          - "     https://gitea-{{ gitea_namespace }}.apps.hub.{{ selected_base_domain }}/{{ gitea_admin_user }}/vms"
+          - "=========================================="

@@ -1,0 +1,146 @@
+---
+# Validate BGP router routing configuration
+# Verifies worker nodes can reach internet via BGP router
+
+- name: Test connectivity from BGP router to internet
+  shell: |
+    ssh -i ~/.ssh/{{ bastion_key_name }} \
+        -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null \
+        -o ConnectTimeout=10 \
+        {{ router_user }}@{{ router_private_ip }} "
+      # Test ping to internet
+      ping -c 3 -W 2 8.8.8.8 >/dev/null 2>&1 && echo 'PING_SUCCESS' || echo 'PING_FAILED'
+
+      # Test HTTP connectivity
+      curl -s -m 5 http://www.google.com >/dev/null 2>&1 && echo 'HTTP_SUCCESS' || echo 'HTTP_FAILED'
+
+      # Check firewall masquerade status
+      echo 'MASQUERADE='
+      sudo firewall-cmd --query-masquerade 2>/dev/null && echo 'ENABLED' || echo 'DISABLED'
+
+      # Check IP forwarding (output on same line for parsing)
+      echo \"IP_FORWARD=\$(sysctl -n net.ipv4.ip_forward)\"
+    "
+  register: router_validation
+  retries: "{{ health_check_retries | default(3) }}"
+  delay: "{{ health_check_delay | default(10) }}"
+  until: "'PING_SUCCESS' in router_validation.stdout and 'HTTP_SUCCESS' in router_validation.stdout"
+  changed_when: false
+  failed_when: false
+  when: health_check_enabled | default(true)
+
+- name: Parse router validation results
+  set_fact:
+    router_ping_ok: "{{ 'PING_SUCCESS' in router_validation.stdout }}"
+    router_http_ok: "{{ 'HTTP_SUCCESS' in router_validation.stdout }}"
+    router_ip_forward_ok: "{{ 'IP_FORWARD=1' in router_validation.stdout }}"
+  when: health_check_enabled | default(true)
+
+- name: Display router validation results
+  debug:
+    msg:
+      - "=========================================="
+      - "BGP Router Validation - {{ cluster_name }}"
+      - "=========================================="
+      - "Router Instance: {{ router_instance_id }}"
+      - "Router IP: {{ router_private_ip }}"
+      - ""
+      - "Connectivity Tests:"
+      - "  Ping (8.8.8.8): {{ 'PASS' if router_ping_ok else 'FAIL' }}"
+      - "  HTTP (google.com): {{ 'PASS' if router_http_ok else 'FAIL' }}"
+      - "  IP Forwarding: {{ 'ENABLED' if router_ip_forward_ok else 'DISABLED' }}"
+  when: health_check_enabled | default(true)
+
+- name: Get worker node IPs for connectivity testing
+  set_fact:
+    worker_test_ips: "{{ worker_instance_details | map(attribute='private_ip') | list }}"
+
+- name: Test connectivity from worker nodes to router
+  shell: |
+    oc debug node/{{ item.name }} -- chroot /host ping -c 3 -W 2 {{ router_private_ip }} >/dev/null 2>&1 && echo 'SUCCESS' || echo 'FAILED'
+  environment:
+    KUBECONFIG: "{{ cluster_install_dir }}/auth/kubeconfig"
+  loop: "{{ worker_instance_details[:3] }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: worker_to_router_ping
+  changed_when: false
+  failed_when: false
+  when: health_check_enabled | default(true)
+
+- name: Test internet connectivity from worker nodes
+  shell: |
+    oc debug node/{{ item.name }} -- chroot /host ping -c 3 -W 2 8.8.8.8 >/dev/null 2>&1 && echo 'SUCCESS' || echo 'FAILED'
+  environment:
+    KUBECONFIG: "{{ cluster_install_dir }}/auth/kubeconfig"
+  loop: "{{ worker_instance_details[:3] }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: worker_internet_ping
+  changed_when: false
+  failed_when: false
+  when: health_check_enabled | default(true)
+
+- name: Display worker connectivity test results
+  debug:
+    msg:
+      - "Worker Node Connectivity Tests:"
+      - "{% for result in worker_to_router_ping.results %}{{ result.item.name }} → Router: {{ 'PASS' if 'SUCCESS' in result.stdout else 'FAIL' }}{% endfor %}"
+      - ""
+      - "{% for result in worker_internet_ping.results %}{{ result.item.name }} → Internet: {{ 'PASS' if 'SUCCESS' in result.stdout else 'FAIL' }}{% endfor %}"
+  when: health_check_enabled | default(true)
+
+- name: Check BGP peering status
+  shell: |
+    ssh -i ~/.ssh/{{ bastion_key_name }} \
+        -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null \
+        -o ConnectTimeout=10 \
+        {{ router_user }}@{{ router_private_ip }} "
+      sudo vtysh -c 'show bgp summary' 2>/dev/null || echo 'BGP_NOT_CONFIGURED'
+    "
+  register: bgp_status
+  changed_when: false
+  failed_when: false
+  when: health_check_enabled | default(true)
+
+- name: Display BGP peering status
+  debug:
+    msg:
+      - "BGP Peering Status:"
+      - "{{ bgp_status.stdout_lines }}"
+  when: health_check_enabled | default(true)
+
+- name: Validation summary
+  debug:
+    msg:
+      - "=========================================="
+      - "Routing Validation Summary - {{ cluster_name }}"
+      - "=========================================="
+      - "Router Health: {{ 'PASS' if (router_ping_ok and router_http_ok and router_ip_forward_ok) else 'FAIL' }}"
+      - "Worker Connectivity: Tested {{ worker_instance_details[:3] | length }} worker(s)"
+      - ""
+      - "Status: {{ 'ROUTING VALIDATED' if (router_ping_ok and router_http_ok) else 'VALIDATION FAILED' }}"
+      - ""
+      - "{% if not (router_ping_ok and router_http_ok) %}WARNING: Routing validation failed!{% endif %}"
+      - "{% if not (router_ping_ok and router_http_ok) %}Consider rollback: ansible-playbook playbooks/78-rollback-vpc-routing.yml{% endif %}"
+  when: health_check_enabled | default(true)
+
+- name: Fail if validation unsuccessful
+  fail:
+    msg: |
+      Routing validation failed for cluster {{ cluster_name }}!
+
+      Router validation failed:
+        - Ping: {{ 'OK' if router_ping_ok else 'FAILED' }}
+        - HTTP: {{ 'OK' if router_http_ok else 'FAILED' }}
+        - IP Forwarding: {{ 'OK' if router_ip_forward_ok else 'FAILED' }}
+
+      This indicates the BGP router cannot properly route worker traffic.
+
+      To rollback:
+        ansible-playbook playbooks/78-rollback-vpc-routing.yml
+  when:
+    - health_check_enabled | default(true)
+    - not (router_ping_ok and router_http_ok and router_ip_forward_ok)

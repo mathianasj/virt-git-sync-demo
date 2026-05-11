@@ -6,23 +6,57 @@ aws_availability_zones:
   - us-east-1b
   - us-east-1c
 
-# VPC Configuration
-vpc_name: ocp-dual-cluster-vpc
-vpc_cidr: 10.0.0.0/16
-public_subnets:
-  - cidr: 10.0.1.0/24
-    az: us-east-1a
-  - cidr: 10.0.2.0/24
-    az: us-east-1b
-  - cidr: 10.0.3.0/24
-    az: us-east-1c
-private_subnets:
-  - cidr: 10.0.11.0/24
-    az: us-east-1a
-  - cidr: 10.0.12.0/24
-    az: us-east-1b
-  - cidr: 10.0.13.0/24
-    az: us-east-1c
+# VPC Configuration - Separate VPCs per cluster with non-overlapping CIDRs
+vpcs:
+  - name: hub-cluster-vpc
+    cidr: 10.0.0.0/16
+    cluster: hub
+    public_subnets:
+      - cidr: 10.0.1.0/24
+        az: us-east-1a
+      - cidr: 10.0.2.0/24
+        az: us-east-1b
+      - cidr: 10.0.3.0/24
+        az: us-east-1c
+    private_subnets:
+      - cidr: 10.0.11.0/24
+        az: us-east-1a
+      - cidr: 10.0.12.0/24
+        az: us-east-1b
+      - cidr: 10.0.13.0/24
+        az: us-east-1c
+
+  - name: managed-cluster-vpc
+    cidr: 10.1.0.0/16
+    cluster: managed
+    public_subnets:
+      - cidr: 10.1.1.0/24
+        az: us-east-1a
+      - cidr: 10.1.2.0/24
+        az: us-east-1b
+      - cidr: 10.1.3.0/24
+        az: us-east-1c
+    private_subnets:
+      - cidr: 10.1.11.0/24
+        az: us-east-1a
+      - cidr: 10.1.12.0/24
+        az: us-east-1b
+      - cidr: 10.1.13.0/24
+        az: us-east-1c
+
+# Shared bastion VPC configuration
+bastion_vpc:
+  name: bastion-vpc
+  cidr: 10.255.0.0/16
+  public_subnets:
+    - cidr: 10.255.1.0/24
+      az: us-east-1a
+  private_subnets:
+    - cidr: 10.255.11.0/24
+      az: us-east-1a
+
+# VPC Peering Configuration
+enable_vpc_peering: true
 
 # Bastion Configuration
 bastion_instance_type: t3.medium
@@ -40,9 +74,11 @@ clusters:
   - name: hub-cluster
     base_domain: example.com
     cluster_name: hub
-    install_dir: /root/cluster-hub
+    install_dir: /home/ec2-user/cluster-hub
     tmux_session: hub-install
     machine_network: 10.0.0.0/16
+    vpc_name: hub-cluster-vpc
+    vpc_cidr: 10.0.0.0/16
     control_plane:
       instance_type: m5.xlarge
       replicas: 3
@@ -53,9 +89,11 @@ clusters:
   - name: managed-cluster
     base_domain: example.com
     cluster_name: managed
-    install_dir: /root/cluster-managed
+    install_dir: /home/ec2-user/cluster-managed
     tmux_session: managed-install
-    machine_network: 10.0.0.0/16
+    machine_network: 10.1.0.0/16
+    vpc_name: managed-cluster-vpc
+    vpc_cidr: 10.1.0.0/16
     control_plane:
       instance_type: m5.xlarge
       replicas: 3
@@ -70,7 +108,7 @@ bare_metal_machineset_name: metal-workers
 
 # ACM Configuration
 acm_namespace: open-cluster-management
-acm_operator_channel: release-2.12
+acm_operator_channel: release-2.16
 acm_operator_source: redhat-operators
 acm_operator_name: advanced-cluster-management
 
@@ -88,9 +126,78 @@ gitea_admin_user: gitea_admin
 gitea_admin_password: ChangeMe123!
 gitea_storage_size: 10Gi
 
+# cert-manager Configuration
+certmanager_namespace: cert-manager
+certmanager_operator_channel: stable-v1
+certmanager_letsencrypt_email: admin@example.com
+
+# virt-git-sync Configuration
+virtgitsync_namespace: virtgitsync
+virtgitsync_operator_name: virt-git-sync
+virtgitsync_operator_channel: alpha
+virtgitsync_operator_source: community-operators
+virtgitsync_policy_namespace: virtgitsync-policies
+
+# OpenShift Data Foundation Configuration
+odf_namespace: openshift-storage
+odf_operator_channel: stable-4.20
+odf_operator_source: redhat-operators
+odf_policy_namespace: odf-policies
+odf_storage_instance_type: m5.2xlarge
+odf_storage_replicas: 3
+odf_storage_machineset_name: odf-storage
+odf_storage_volume_size: 500
+
+# Router Configuration (EC2 with FRRouting)
+router_instance_type: t3.small
+router_availability_zone: us-east-1a
+router_key_name: ocp-bastion-key
+router_user: ec2-user
+
+# Static IP addresses for BGP routers (must be within worker subnets)
+# These IPs are used as default gateway for c5.metal bare metal nodes
+hub_router_ip: 10.0.11.111
+managed_router_ip: 10.1.11.224
+
+# OVN-Kubernetes BGP Configuration
+bgp_asn_hub: 64512
+bgp_asn_managed: 64513
+bgp_router_asn: 64500
+ovn_bgp_agent_image: quay.io/openshift/origin-ovn-kubernetes-microshift:latest
+
+# ClusterUserDefinedNetwork Configuration
+cudn_policy_namespace: cudn-policies
+cudn_network_name: cudn-net
+cudn_vm_namespace: cudn-vms
+cudn_cidr: 192.168.100.0/24
+cudn_namespace_label_key: network.kubevirt.io/udn
+cudn_namespace_label_value: kubevirt-l2
+cudn_primary_label_key: k8s.ovn.org/primary-user-defined-network
+cudn_primary_label_value: ""
+cudn_network_label_key: network.type
+cudn_network_label_value: kubevirt-l2
+
+# BGP Router Routing Configuration
+# Split routing strategy:
+# - Worker subnet (10.X.11.0/24, same AZ as router): Routes through BGP router for VM networking
+# - Control plane subnets (10.X.12.0/24, 10.X.13.0/24): Route directly to NAT Gateway for internet access
+# This ensures control plane nodes can reach cluster routes (OAuth, console) while workers use BGP
+router_nat_enabled: true
+worker_routing_enabled: true
+worker_instance_type: c5.metal
+worker_node_role_tag: "node-role.kubernetes.io/worker-cnv"
+
+# Route table backup location
+route_backup_dir: /tmp/route-backups
+
+# Health check settings
+health_check_enabled: true
+health_check_retries: 3
+health_check_delay: 10
+
 # State Tracking
-state_file: /root/.ocp-deployment-state.json
-log_file: /var/log/ocp-deployment.log
+state_file: /home/ec2-user/.ocp-deployment-state.json
+log_file: /home/ec2-user/ocp-deployment.log
 
 # Timeouts
 installation_timeout_minutes: 90

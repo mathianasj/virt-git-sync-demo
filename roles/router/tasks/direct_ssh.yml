@@ -1,0 +1,29 @@
+---
+# Execute command on router via direct SSH from bastion
+# This file provides direct SSH access to routers using VPC peering
+# Eliminates the need for SSH helper pods and EC2 Instance Connect
+#
+# Variables expected:
+#   - router_private_ip: Router's private IP address
+#   - router_command: Command to execute on router
+#
+# Optional variables:
+#   - bastion_key_name: SSH key name (defaults from group_vars/all.yml)
+#   - router_user: SSH user (defaults from group_vars/all.yml or ec2-user)
+
+- name: Execute command on router via direct SSH
+  shell: |
+    ssh -i ~/.ssh/{{ bastion_key_name }} \
+        -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null \
+        -o ConnectTimeout=10 \
+        {{ router_user | default('ec2-user') }}@{{ router_private_ip }} "{{ router_command }}"
+  register: router_ssh_result
+  changed_when: false
+
+- name: Display router command output
+  debug:
+    var: router_ssh_result.stdout_lines
+  when:
+    - router_ssh_result.stdout is defined
+    - router_ssh_result.stdout | length > 0

@@ -1,0 +1,46 @@
+---
+- name: Create bare metal machineset on {{ cluster_config.cluster_name }} in parallel
+  shell: |
+    export KUBECONFIG={{ cluster_config.install_dir }}/auth/kubeconfig
+
+    # Get base machineset details
+    INFRA_ID=$(oc get machineset.machine.openshift.io -n openshift-machine-api -o json | jq -r '.items[0].metadata.labels["machine.openshift.io/cluster-api-cluster"]')
+
+    # Create machineset from existing template
+    oc get machineset.machine.openshift.io -n openshift-machine-api -o json | jq '.items[0]' | \
+    jq --arg name "${INFRA_ID}-{{ bare_metal_machineset_name }}" \
+       --arg replicas "{{ bare_metal_replicas }}" \
+       --arg instance_type "{{ bare_metal_instance_type }}" \
+       '
+      .metadata.name = $name |
+      .metadata.labels["machine.openshift.io/cluster-api-machineset"] = $name |
+      .spec.replicas = ($replicas | tonumber) |
+      .spec.selector.matchLabels["machine.openshift.io/cluster-api-machineset"] = $name |
+      .spec.template.metadata.labels["machine.openshift.io/cluster-api-machineset"] = $name |
+      .spec.template.metadata.labels["node-role.kubernetes.io/worker-cnv"] = "" |
+      .spec.template.spec.metadata.labels["node-role.kubernetes.io/worker-cnv"] = "" |
+      .spec.template.spec.providerSpec.value.instanceType = $instance_type |
+      del(.status)
+      ' | oc apply -f -
+
+    # Wait for machines to be ready
+    echo "Waiting for {{ bare_metal_replicas }} bare metal nodes on {{ cluster_config.cluster_name }}..."
+    for i in $(seq 1 {{ machineset_timeout_minutes }}); do
+      READY=$(oc get nodes -l node-role.kubernetes.io/worker-cnv --no-headers 2>/dev/null | grep " Ready " | wc -l)
+      if [ "$READY" -ge "{{ bare_metal_replicas }}" ]; then
+        echo "{{ cluster_config.cluster_name }}: {{ bare_metal_replicas }} bare metal nodes ready"
+        exit 0
+      fi
+      echo "{{ cluster_config.cluster_name }}: $READY/{{ bare_metal_replicas }} nodes ready (${i}m)"
+      sleep 60
+    done
+
+    echo "{{ cluster_config.cluster_name }}: Timeout waiting for bare metal nodes"
+    exit 1
+  async: 3600
+  poll: 0
+  register: machineset_job
+
+- name: Store async job ID for {{ cluster_config.cluster_name }}
+  set_fact:
+    async_jobs: "{{ async_jobs | default([]) + [{'cluster': cluster_config.cluster_name, 'job_id': machineset_job.ansible_job_id}] }}"

@@ -1,0 +1,116 @@
+---
+# Simplified ODF StorageCluster Policy - Following Red Hat Best Practices
+# Creates ONLY the StorageCluster CR, lets ODF manage everything else
+
+- name: Create ODF StorageCluster policy (both clusters)
+  kubernetes.core.k8s:
+    kubeconfig: "{{ hub_kubeconfig }}"
+    state: present
+    definition:
+      apiVersion: policy.open-cluster-management.io/v1
+      kind: Policy
+      metadata:
+        name: policy-odf-storage-cluster
+        namespace: "{{ odf_policy_namespace }}"
+        annotations:
+          policy.open-cluster-management.io/standards: NIST-CSF
+          policy.open-cluster-management.io/categories: CM Configuration Management
+          policy.open-cluster-management.io/controls: CM-2 Baseline Configuration
+      spec:
+        remediationAction: enforce
+        disabled: false
+        policy-templates:
+          - objectDefinition:
+              apiVersion: policy.open-cluster-management.io/v1
+              kind: ConfigurationPolicy
+              metadata:
+                name: policy-odf-storage-cluster
+              spec:
+                remediationAction: enforce
+                severity: high
+                object-templates:
+                  - complianceType: musthave
+                    objectDefinition:
+                      apiVersion: ocs.openshift.io/v1
+                      kind: StorageCluster
+                      metadata:
+                        name: ocs-storagecluster
+                        namespace: "{{ odf_namespace }}"
+                      spec:
+                        resourceProfile: lean
+                        storageDeviceSets:
+                          - name: ocs-deviceset
+                            count: 1
+                            dataPVCTemplate:
+                              spec:
+                                accessModes:
+                                  - ReadWriteOnce
+                                resources:
+                                  requests:
+                                    storage: "{{ odf_storage_volume_size }}Gi"
+                                storageClassName: gp3-csi
+                                volumeMode: Block
+                            replica: 3
+
+- name: Create PlacementRule for StorageCluster (all clusters)
+  kubernetes.core.k8s:
+    kubeconfig: "{{ hub_kubeconfig }}"
+    state: present
+    definition:
+      apiVersion: apps.open-cluster-management.io/v1
+      kind: PlacementRule
+      metadata:
+        name: placement-odf-storage-cluster
+        namespace: "{{ odf_policy_namespace }}"
+      spec:
+        clusterSelector:
+          matchExpressions:
+            - key: vendor
+              operator: In
+              values:
+                - OpenShift
+
+- name: Create PlacementBinding for StorageCluster
+  kubernetes.core.k8s:
+    kubeconfig: "{{ hub_kubeconfig }}"
+    state: present
+    definition:
+      apiVersion: policy.open-cluster-management.io/v1
+      kind: PlacementBinding
+      metadata:
+        name: binding-odf-storage-cluster
+        namespace: "{{ odf_policy_namespace }}"
+      placementRef:
+        name: placement-odf-storage-cluster
+        kind: PlacementRule
+        apiGroup: apps.open-cluster-management.io
+      subjects:
+        - name: policy-odf-storage-cluster
+          kind: Policy
+          apiGroup: policy.open-cluster-management.io
+
+- name: Wait for StorageCluster policy compliance on both clusters
+  shell: |
+    oc get policy policy-odf-storage-cluster -n {{ odf_policy_namespace }} -o json | \
+    jq -r '.status.status[] | select(.compliant=="Compliant") | .clustername' | wc -l
+  environment:
+    KUBECONFIG: "{{ hub_kubeconfig }}"
+  register: storage_compliant_clusters
+  until: storage_compliant_clusters.stdout | int >= 2
+  retries: "{{ operator_timeout_minutes | int * 2 }}"
+  delay: 60
+  changed_when: false
+
+- name: Display StorageCluster policy compliance status
+  debug:
+    msg:
+      - "ODF StorageCluster policy compliance achieved"
+      - "Compliant clusters: {{ storage_compliant_clusters.stdout }}"
+      - "StorageCluster deployed on both clusters"
+      - ""
+      - "Configuration:"
+      - "  - Resource Profile: lean (minimal resource footprint)"
+      - "  - Replica: 3 (one OSD per storage node)"
+      - "  - Count: 1 (single deviceSet replicated across nodes)"
+      - "  - Node Taint: node.ocs.openshift.io/storage=true:NoSchedule"
+      - "  - ODF will auto-create: CephCluster, CephBlockPool, StorageClasses"

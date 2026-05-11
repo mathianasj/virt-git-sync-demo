@@ -1,0 +1,134 @@
+---
+# Update security groups to allow traffic between routers and worker nodes
+# This was done ad hoc and needs to be in the playbook
+
+- name: Get hub worker security group ID
+  shell: |
+    aws ec2 describe-instances \
+      --region {{ aws_region }} \
+      --filters "Name=instance-type,Values=c5.metal" \
+                "Name=instance-state-name,Values=running" \
+                "Name=tag:Name,Values=*hub*worker*" \
+      --query 'Reservations[0].Instances[0].SecurityGroups[?contains(GroupName, `node`)].GroupId' \
+      --output text
+  register: hub_worker_sg
+  changed_when: false
+
+- name: Get hub router security group ID
+  shell: |
+    aws ec2 describe-instances \
+      --region {{ aws_region }} \
+      --filters "Name=private-ip-address,Values={{ hub_router_ip }}" \
+                "Name=instance-state-name,Values=running" \
+      --query 'Reservations[0].Instances[0].SecurityGroups[0].GroupId' \
+      --output text
+  register: hub_router_sg
+  changed_when: false
+
+- name: Add hub router to worker security group for ICMP
+  shell: |
+    aws ec2 authorize-security-group-ingress \
+      --region {{ aws_region }} \
+      --group-id {{ hub_worker_sg.stdout }} \
+      --ip-permissions IpProtocol=icmp,FromPort=-1,ToPort=-1,UserIdGroupPairs="[{GroupId={{ hub_router_sg.stdout }},Description='ICMP from BGP router'}]"
+  when:
+    - hub_worker_sg.stdout | length > 0
+    - hub_router_sg.stdout | length > 0
+  register: hub_icmp_rule
+  failed_when: false  # Rule may already exist
+  changed_when: "'already exists' not in hub_icmp_rule.stderr"
+
+- name: Add hub router to worker security group for all traffic
+  shell: |
+    aws ec2 authorize-security-group-ingress \
+      --region {{ aws_region }} \
+      --group-id {{ hub_worker_sg.stdout }} \
+      --ip-permissions IpProtocol=-1,UserIdGroupPairs="[{GroupId={{ hub_router_sg.stdout }},Description='All traffic from BGP router'}]"
+  when:
+    - hub_worker_sg.stdout | length > 0
+    - hub_router_sg.stdout | length > 0
+  register: hub_all_rule
+  failed_when: false  # Rule may already exist
+  changed_when: "'already exists' not in hub_all_rule.stderr"
+
+- name: Get managed worker security group ID
+  shell: |
+    aws ec2 describe-instances \
+      --region {{ aws_region }} \
+      --filters "Name=instance-type,Values=c5.metal" \
+                "Name=instance-state-name,Values=running" \
+                "Name=tag:Name,Values=*managed*worker*" \
+      --query 'Reservations[0].Instances[0].SecurityGroups[?contains(GroupName, `node`)].GroupId' \
+      --output text
+  register: managed_worker_sg
+  changed_when: false
+
+- name: Get managed router security group ID
+  shell: |
+    aws ec2 describe-instances \
+      --region {{ aws_region }} \
+      --filters "Name=private-ip-address,Values={{ managed_router_ip }}" \
+                "Name=instance-state-name,Values=running" \
+      --query 'Reservations[0].Instances[0].SecurityGroups[0].GroupId' \
+      --output text
+  register: managed_router_sg
+  changed_when: false
+
+- name: Add managed router to worker security group for ICMP
+  shell: |
+    aws ec2 authorize-security-group-ingress \
+      --region {{ aws_region }} \
+      --group-id {{ managed_worker_sg.stdout }} \
+      --ip-permissions IpProtocol=icmp,FromPort=-1,ToPort=-1,UserIdGroupPairs="[{GroupId={{ managed_router_sg.stdout }},Description='ICMP from BGP router'}]"
+  when:
+    - managed_worker_sg.stdout | length > 0
+    - managed_router_sg.stdout | length > 0
+  register: managed_icmp_rule
+  failed_when: false  # Rule may already exist
+  changed_when: "'already exists' not in managed_icmp_rule.stderr"
+
+- name: Add managed router to worker security group for all traffic
+  shell: |
+    aws ec2 authorize-security-group-ingress \
+      --region {{ aws_region }} \
+      --group-id {{ managed_worker_sg.stdout }} \
+      --ip-permissions IpProtocol=-1,UserIdGroupPairs="[{GroupId={{ managed_router_sg.stdout }},Description='All traffic from BGP router'}]"
+  when:
+    - managed_worker_sg.stdout | length > 0
+    - managed_router_sg.stdout | length > 0
+  register: managed_all_rule
+  failed_when: false  # Rule may already exist
+  changed_when: "'already exists' not in managed_all_rule.stderr"
+
+- name: Add SSH access from bastion to hub workers
+  shell: |
+    aws ec2 authorize-security-group-ingress \
+      --region {{ aws_region }} \
+      --group-id {{ hub_worker_sg.stdout }} \
+      --ip-permissions IpProtocol=tcp,FromPort=22,ToPort=22,IpRanges="[{CidrIp=10.255.0.0/16,Description='SSH from bastion VPC'}]"
+  when: hub_worker_sg.stdout | length > 0
+  register: hub_ssh_rule
+  failed_when: false
+  changed_when: "'already exists' not in hub_ssh_rule.stderr"
+
+- name: Add SSH access from bastion to managed workers
+  shell: |
+    aws ec2 authorize-security-group-ingress \
+      --region {{ aws_region }} \
+      --group-id {{ managed_worker_sg.stdout }} \
+      --ip-permissions IpProtocol=tcp,FromPort=22,ToPort=22,IpRanges="[{CidrIp=10.255.0.0/16,Description='SSH from bastion VPC'}]"
+  when: managed_worker_sg.stdout | length > 0
+  register: managed_ssh_rule
+  failed_when: false
+  changed_when: "'already exists' not in managed_ssh_rule.stderr"
+
+- name: Display security group update results
+  debug:
+    msg:
+      - "Hub worker SG: {{ hub_worker_sg.stdout }}"
+      - "Hub router SG: {{ hub_router_sg.stdout }}"
+      - "Managed worker SG: {{ managed_worker_sg.stdout }}"
+      - "Managed router SG: {{ managed_router_sg.stdout }}"
+      - "Security group rules updated to allow:"
+      - "  - Router-worker communication (all protocols)"
+      - "  - Bastion-worker SSH access"

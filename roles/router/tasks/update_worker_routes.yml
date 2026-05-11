@@ -1,0 +1,93 @@
+---
+# Update VPC route tables for worker subnets to route via BGP router
+# Replaces default route (0.0.0.0/0) from NAT Gateway to BGP router instance
+
+- name: Create route backup directory
+  file:
+    path: "{{ route_backup_dir | default('/tmp/route-backups') }}"
+    state: directory
+    mode: '0755'
+  delegate_to: localhost
+
+- name: Update route tables for worker subnets
+  include_tasks: update_single_route_table.yml
+  vars:
+    subnet_id: "{{ item.subnet_id }}"
+    route_table_id: "{{ item.route_table_id }}"
+    route_table_name: "{{ item.name }}"
+  loop: "{{ worker_route_tables }}"
+  loop_control:
+    label: "{{ item.subnet_id }} ({{ item.route_table_id }})"
+
+- name: Wait for route changes to propagate
+  pause:
+    seconds: 10
+    prompt: "Waiting for VPC route table changes to propagate..."
+
+- name: Verify all route tables updated successfully
+  shell: |
+    aws ec2 describe-route-tables \
+      --region {{ aws_region }} \
+      --route-table-ids {{ item.route_table_id }} \
+      --query 'RouteTables[0].Routes[?DestinationCidrBlock==`0.0.0.0/0`].InstanceId' \
+      --output text
+  loop: "{{ worker_route_tables }}"
+  loop_control:
+    label: "{{ item.route_table_id }}"
+  register: route_verification
+  changed_when: false
+
+- name: Check route update status
+  set_fact:
+    routes_updated_correctly: |
+      {% set all_correct = true %}
+      {% for result in route_verification.results %}
+      {% if result.stdout.strip() != router_instance_id %}
+      {% set all_correct = false %}
+      {% endif %}
+      {% endfor %}
+      {{ all_correct }}
+
+- name: Display route update verification
+  debug:
+    msg:
+      - "=========================================="
+      - "Route Update Verification - {{ cluster_name }}"
+      - "=========================================="
+      - "Route Table {{ item.item.route_table_id }}:"
+      - "  Default Route Target: {{ item.stdout.strip() }}"
+      - "  Expected: {{ router_instance_id }}"
+      - "  Status: {{ 'OK' if item.stdout.strip() == router_instance_id else 'MISMATCH' }}"
+      - ""
+  loop: "{{ route_verification.results }}"
+  loop_control:
+    label: "{{ item.item.route_table_id }}"
+
+- name: Display overall verification status
+  debug:
+    msg:
+      - "Overall Status: {{ 'ALL ROUTES UPDATED' if routes_updated_correctly else 'SOME ROUTES FAILED' }}"
+
+- name: Fail if route updates were not successful
+  fail:
+    msg: |
+      Route table updates failed for cluster {{ cluster_name }}!
+
+      Not all route tables are pointing to router {{ router_instance_id }}.
+      Check the verification output above.
+
+      Rollback may be needed - see playbook 78-rollback-vpc-routing.yml
+  when: not routes_updated_correctly
+
+- name: Route update summary
+  debug:
+    msg:
+      - "=========================================="
+      - "Worker Route Tables Updated - {{ cluster_name }}"
+      - "=========================================="
+      - "Updated {{ worker_route_tables | length }} route table(s)"
+      - "Router Instance: {{ router_instance_id }}"
+      - "Router Private IP: {{ router_private_ip }}"
+      - ""
+      - "All worker node traffic (0.0.0.0/0) now routes via BGP router"
+      - "Backups saved to: {{ route_backup_dir | default('/tmp/route-backups') }}"

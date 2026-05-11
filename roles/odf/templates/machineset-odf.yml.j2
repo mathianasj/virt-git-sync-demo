@@ -1,0 +1,60 @@
+apiVersion: machine.openshift.io/v1beta1
+kind: MachineSet
+metadata:
+  name: {{ infra_id }}-{{ odf_storage_machineset_name }}
+  namespace: openshift-machine-api
+  labels:
+    machine.openshift.io/cluster-api-cluster: {{ infra_id }}
+spec:
+  replicas: {{ odf_storage_replicas }}
+  selector:
+    matchLabels:
+      machine.openshift.io/cluster-api-cluster: {{ infra_id }}
+      machine.openshift.io/cluster-api-machineset: {{ infra_id }}-{{ odf_storage_machineset_name }}
+  template:
+    metadata:
+      labels:
+        machine.openshift.io/cluster-api-cluster: {{ infra_id }}
+        machine.openshift.io/cluster-api-machine-role: worker
+        machine.openshift.io/cluster-api-machine-type: worker
+        machine.openshift.io/cluster-api-machineset: {{ infra_id }}-{{ odf_storage_machineset_name }}
+        cluster.ocs.openshift.io/openshift-storage: ""
+    spec:
+      metadata:
+        labels:
+          cluster.ocs.openshift.io/openshift-storage: ""
+      providerSpec:
+        value:
+          apiVersion: machine.openshift.io/v1beta1
+          kind: AWSMachineProviderConfig
+          ami:
+            id: {{ ami_id }}
+          instanceType: {{ odf_storage_instance_type }}
+          placement:
+            region: {{ aws_region }}
+            availabilityZone: {{ availability_zone }}
+          blockDeviceMappings:
+            - deviceName: /dev/sda1
+              ebs:
+                volumeSize: 120
+                volumeType: gp3
+                deleteOnTermination: true
+                encrypted: true
+            - deviceName: /dev/sdb
+              ebs:
+                volumeSize: {{ odf_storage_volume_size }}
+                volumeType: gp3
+                deleteOnTermination: true
+                encrypted: true
+                iops: 3000
+                throughput: 125
+          iamInstanceProfile:
+            id: {{ iam_profile }}
+          securityGroups: {{ security_groups }}
+          subnet:
+            id: {{ subnet_id }}
+          userDataSecret:
+            name: worker-user-data
+          tags:
+            - name: kubernetes.io/cluster/{{ infra_id }}
+              value: owned

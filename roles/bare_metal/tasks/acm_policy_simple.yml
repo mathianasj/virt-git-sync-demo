@@ -1,0 +1,90 @@
+---
+- name: Set hub kubeconfig environment
+  set_fact:
+    hub_kubeconfig_env:
+      KUBECONFIG: "{{ hub_kubeconfig }}"
+
+- name: Create namespace for bare metal policies
+  kubernetes.core.k8s:
+    kubeconfig: "{{ hub_kubeconfig }}"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: bare-metal-policies
+
+- name: Gather machineset details and create policies for each cluster
+  include_tasks: create_cluster_policy.yml
+  loop: "{{ clusters }}"
+  loop_control:
+    loop_var: target_cluster
+    label: "{{ target_cluster.cluster_name }}"
+
+- name: Monitor bare metal nodes on both clusters concurrently
+  shell: |
+    export KUBECONFIG={{ item.install_dir }}/auth/kubeconfig
+    TIMEOUT={{ machineset_timeout_minutes | int }}
+    ELAPSED=0
+
+    echo "Monitoring {{ item.cluster_name }} for {{ bare_metal_replicas }} bare metal nodes..."
+
+    while [ $ELAPSED -lt $TIMEOUT ]; do
+      READY_COUNT=$(oc get nodes -l node-role.kubernetes.io/worker-cnv --no-headers 2>/dev/null | grep " Ready " | wc -l)
+
+      if [ "$READY_COUNT" -ge "{{ bare_metal_replicas }}" ]; then
+        echo "{{ item.cluster_name }}: {{ bare_metal_replicas }} bare metal nodes ready"
+        exit 0
+      fi
+
+      echo "{{ item.cluster_name }}: $READY_COUNT/{{ bare_metal_replicas }} nodes ready (elapsed: ${ELAPSED}m)"
+      sleep 60
+      ELAPSED=$((ELAPSED + 1))
+    done
+
+    echo "{{ item.cluster_name }}: Timeout waiting for bare metal nodes"
+    exit 1
+  loop: "{{ clusters }}"
+  loop_control:
+    label: "{{ item.cluster_name }}"
+  async: 3600
+  poll: 0
+  register: node_monitoring_jobs
+
+- name: Wait for all clusters to have bare metal nodes ready
+  async_status:
+    jid: "{{ item.ansible_job_id }}"
+  loop: "{{ node_monitoring_jobs.results }}"
+  loop_control:
+    label: "{{ item.item.cluster_name }}"
+  register: node_monitoring_results
+  until: node_monitoring_results.finished
+  retries: 60
+  delay: 60
+
+- name: Display monitoring results
+  debug:
+    msg: "{{ item.stdout_lines }}"
+  loop: "{{ node_monitoring_results.results }}"
+  loop_control:
+    label: "{{ item.item.item.cluster_name }}"
+
+- name: Verify CNV-labeled nodes on both clusters
+  shell: |
+    export KUBECONFIG={{ item.install_dir }}/auth/kubeconfig
+    oc get nodes -l node-role.kubernetes.io/worker-cnv --no-headers | wc -l
+  loop: "{{ clusters }}"
+  loop_control:
+    label: "{{ item.cluster_name }}"
+  register: cnv_node_counts
+  changed_when: false
+
+- name: Display bare metal deployment status
+  debug:
+    msg:
+      - "Bare metal machinesets deployed via ACM policies to all clusters"
+      - "Instance type: {{ bare_metal_instance_type }}"
+      - "Replicas per cluster: {{ bare_metal_replicas }}"
+      - "Hub cluster CNV nodes: {{ cnv_node_counts.results[0].stdout }}"
+      - "Managed cluster CNV nodes: {{ cnv_node_counts.results[1].stdout }}"
+      - "Total bare metal nodes: {{ (cnv_node_counts.results[0].stdout | int) + (cnv_node_counts.results[1].stdout | int) }}"

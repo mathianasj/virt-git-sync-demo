@@ -1,8 +1,51 @@
 ---
-- name: Phase 4 - OpenShift Cluster Installation
-  hosts: bastion
+- name: Gather bastion information
+  hosts: localhost
   gather_facts: no
-  become: yes
+  become: no
+  vars_files:
+    - /tmp/selected-domain.yml
+  tasks:
+    - name: Load global variables
+      include_vars:
+        file: "{{ playbook_dir }}/../group_vars/all.yml"
+
+    - name: Display phase timing information
+      debug:
+        msg:
+          - "=========================================="
+          - "Phase 4: OpenShift Installation"
+          - "=========================================="
+          - "Expected Runtime: 40-60 minutes"
+          - "Started: {{ ansible_date_time.time }}"
+          - "Estimated Completion: {{ '%02d:%02d' | format((ansible_date_time.hour | int + ((ansible_date_time.minute | int + 60) // 60)) % 24, (ansible_date_time.minute | int + 60) % 60) }}"
+          - "Note: This runs in tmux on bastion - safe to disconnect"
+          - "=========================================="
+
+    - name: Get bastion public IP from AWS
+      shell: |
+        aws ec2 describe-instances \
+          --region {{ aws_region }} \
+          --filters "Name=tag:Role,Values=bastion" "Name=instance-state-name,Values=running" \
+          --query 'Reservations[0].Instances[0].PublicIpAddress' \
+          --output text
+      register: bastion_ip_result
+      changed_when: false
+
+    - name: Add bastion to inventory
+      add_host:
+        name: bastion_host
+        groups: bastion_dynamic
+        ansible_host: "{{ bastion_ip_result.stdout }}"
+        ansible_user: "{{ bastion_user }}"
+        ansible_ssh_private_key_file: "~/.ssh/{{ bastion_key_name }}"
+        ansible_ssh_common_args: "-o StrictHostKeyChecking=no"
+        ansible_python_interpreter: /usr/bin/python3
+
+- name: Phase 4 - OpenShift Cluster Installation
+  hosts: bastion_dynamic
+  gather_facts: no
+  become: no
   serial: 1
   vars_files:
     - /tmp/selected-domain.yml
@@ -20,11 +63,27 @@
           {% set _ = updated_clusters.append(cluster) %}
           {% endfor %}
           {{ updated_clusters }}
+
+    - name: Read infrastructure state from controller
+      delegate_to: localhost
+      become: no
+      slurp:
+        src: /tmp/aws-infrastructure-state.json
+      register: infrastructure_state_file
+
+    - name: Parse infrastructure state
+      set_fact:
+        infrastructure_state: "{{ infrastructure_state_file.content | b64decode | from_json }}"
+
+    - name: Set VPC subnet variables
+      set_fact:
+        vpc_public_subnets: "{{ infrastructure_state.vpc_public_subnets }}"
+        vpc_private_subnets: "{{ infrastructure_state.vpc_private_subnets }}"
   vars:
     clusters_to_install: "{{ clusters }}"
 
   tasks:
-    - name: Install clusters using tmux sessions
+    - name: Prepare cluster installations (create configs and start tmux)
       include_role:
         name: openshift_installer
       vars:
@@ -33,11 +92,83 @@
       loop_control:
         label: "{{ item.cluster_name }}"
 
+    - name: Create monitoring script for each cluster
+      template:
+        src: "{{ playbook_dir }}/../roles/openshift_installer/templates/monitor-installation.sh.j2"
+        dest: "/tmp/monitor-{{ item.cluster_name }}.sh"
+        mode: '0755'
+      vars:
+        cluster_name: "{{ item.cluster_name }}"
+        install_dir: "{{ item.install_dir }}"
+        tmux_session: "{{ item.tmux_session }}"
+      loop: "{{ clusters_to_install }}"
+      loop_control:
+        label: "{{ item.cluster_name }}"
+
+    - name: Monitor cluster installations concurrently
+      shell: /tmp/monitor-{{ item.cluster_name }}.sh
+      args:
+        executable: /bin/bash
+      loop: "{{ clusters_to_install }}"
+      loop_control:
+        label: "{{ item.cluster_name }}"
+      async: 7200
+      poll: 0
+      register: cluster_monitors
+
+    - name: Wait for all cluster installations to complete
+      async_status:
+        jid: "{{ item.ansible_job_id }}"
+      loop: "{{ cluster_monitors.results }}"
+      loop_control:
+        label: "{{ item.item.cluster_name }}"
+      register: install_results
+      until: install_results.finished | bool
+      retries: 120
+      delay: 60
+
+    - name: Display installation results
+      debug:
+        msg: "{{ item.stdout_lines }}"
+      loop: "{{ install_results.results }}"
+      loop_control:
+        label: "{{ item.item.item.cluster_name }}"
+
+    - name: Update state file for completed clusters
+      shell: |
+        jq '.clusters["{{ item.item.item.cluster_name }}"] = {
+          "status": "complete",
+          "install_dir": "{{ item.item.item.install_dir }}",
+          "completed_at": "'$(date -u +%Y-%m-%dT%H:%M:%SZ)'"
+        }' {{ state_file }} > {{ state_file }}.tmp && mv {{ state_file }}.tmp {{ state_file }}
+      loop: "{{ install_results.results }}"
+      loop_control:
+        label: "{{ item.item.item.cluster_name }}"
+      when: item.rc == 0
+
   post_tasks:
-    - name: Display cluster installation status
+    - name: Read kubeadmin passwords for all clusters
+      slurp:
+        src: "{{ item.install_dir }}/auth/kubeadmin-password"
+      register: kubeadmin_passwords
+      loop: "{{ clusters_to_install }}"
+      loop_control:
+        label: "{{ item.cluster_name }}"
+      failed_when: false
+
+    - name: Display cluster installation details
       debug:
         msg:
-          - "OpenShift clusters installed successfully"
-          - "Hub cluster: {{ clusters[0].cluster_name }}"
-          - "Managed cluster: {{ clusters[1].cluster_name }}"
-          - "Kubeconfig files available on bastion"
+          - "=========================================="
+          - "Cluster: {{ item.cluster_name }}"
+          - "=========================================="
+          - "Console URL: https://console-openshift-console.apps.{{ item.cluster_name }}.{{ item.base_domain }}"
+          - "API URL: https://api.{{ item.cluster_name }}.{{ item.base_domain }}:6443"
+          - "Kubeconfig: {{ item.install_dir }}/auth/kubeconfig"
+          - "Username: kubeadmin"
+          - "Password: {{ (kubeadmin_passwords.results[idx].content | b64decode) if kubeadmin_passwords.results[idx].content is defined else 'Not available - check ' + item.install_dir + '/auth/kubeadmin-password' }}"
+          - ""
+      loop: "{{ clusters_to_install }}"
+      loop_control:
+        index_var: idx
+        label: "{{ item.cluster_name }}"

@@ -69,9 +69,15 @@
 - import_playbook: 04-openshift-install.yml
 - import_playbook: 05-acm-setup.yml
 - import_playbook: 06-import-cluster.yml
-- import_playbook: 07-bare-metal-machinesets.yml
-- import_playbook: 08-virtualization-policy.yml
-- import_playbook: 09-gitea-deployment.yml
+- import_playbook: 07-frr-routers.yml
+- import_playbook: 08-bare-metal-machinesets.yml
+- import_playbook: 09-virtualization-policy.yml
+- import_playbook: 10-gitea-deployment.yml
+- import_playbook: 11-cert-manager-setup.yml
+- import_playbook: 12-virt-git-sync-setup.yml
+- import_playbook: 13-odf-setup.yml
+- import_playbook: 14-bgp-configuration.yml
+- import_playbook: 15-cudn-network.yml
 
 - name: Deployment Summary
   hosts: localhost

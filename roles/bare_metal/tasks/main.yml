@@ -1,101 +1,72 @@
 ---
-- name: Set kubeconfig environment
-  set_fact:
-    kubeconfig_env:
-      KUBECONFIG: "{{ kubeconfig_path }}"
+# Create MachineConfigs for BGP routing on bare metal nodes (before MachineSets)
+- name: Create MachineConfig for bare metal BGP routing on all clusters
+  include_tasks: create_machineconfig.yml
+  loop: "{{ clusters }}"
+  loop_control:
+    loop_var: cluster_config
+    label: "{{ cluster_config.cluster_name }}"
 
-- name: Get existing machineset for reference
-  shell: |
-    oc get machineset -n openshift-machine-api -o json | jq -r '.items[0]'
-  environment: "{{ kubeconfig_env }}"
-  register: base_machineset
-  changed_when: false
+# Deploy bare metal machinesets in parallel to both clusters
+- name: Create bare metal machinesets on all clusters in parallel
+  include_tasks: direct_parallel.yml
+  loop: "{{ clusters }}"
+  loop_control:
+    loop_var: cluster_config
+    label: "{{ cluster_config.cluster_name }}"
 
-- name: Parse base machineset
-  set_fact:
-    machineset_json: "{{ base_machineset.stdout | from_json }}"
-
-- name: Extract required values from base machineset
-  set_fact:
-    aws_region_from_ms: "{{ machineset_json.spec.template.spec.providerSpec.value.placement.region }}"
-    ami_id: "{{ machineset_json.spec.template.spec.providerSpec.value.ami.id }}"
-    iam_instance_profile: "{{ machineset_json.spec.template.spec.providerSpec.value.iamInstanceProfile.id }}"
-    security_groups: "{{ machineset_json.spec.template.spec.providerSpec.value.securityGroups }}"
-    subnet_id: "{{ machineset_json.spec.template.spec.providerSpec.value.subnet.id }}"
-
-- name: Create bare metal machineset
-  kubernetes.core.k8s:
-    kubeconfig: "{{ kubeconfig_path }}"
-    state: present
-    definition:
-      apiVersion: machine.openshift.io/v1beta1
-      kind: MachineSet
-      metadata:
-        name: "{{ cluster_config.cluster_name }}-{{ bare_metal_machineset_name }}"
-        namespace: openshift-machine-api
-        labels:
-          machine.openshift.io/cluster-api-cluster: "{{ cluster_config.cluster_name }}"
-      spec:
-        replicas: "{{ bare_metal_replicas }}"
-        selector:
-          matchLabels:
-            machine.openshift.io/cluster-api-cluster: "{{ cluster_config.cluster_name }}"
-            machine.openshift.io/cluster-api-machineset: "{{ cluster_config.cluster_name }}-{{ bare_metal_machineset_name }}"
-        template:
-          metadata:
-            labels:
-              machine.openshift.io/cluster-api-cluster: "{{ cluster_config.cluster_name }}"
-              machine.openshift.io/cluster-api-machine-role: worker
-              machine.openshift.io/cluster-api-machine-type: worker
-              machine.openshift.io/cluster-api-machineset: "{{ cluster_config.cluster_name }}-{{ bare_metal_machineset_name }}"
-              node-role.kubernetes.io/worker-cnv: ""
-          spec:
-            metadata:
-              labels:
-                node-role.kubernetes.io/worker-cnv: ""
-            providerSpec:
-              value:
-                apiVersion: machine.openshift.io/v1beta1
-                kind: AWSMachineProviderConfig
-                ami:
-                  id: "{{ ami_id }}"
-                instanceType: "{{ bare_metal_instance_type }}"
-                placement:
-                  region: "{{ aws_region_from_ms }}"
-                  availabilityZone: "{{ aws_region }}a"
-                iamInstanceProfile:
-                  id: "{{ iam_instance_profile }}"
-                securityGroups: "{{ security_groups }}"
-                subnet:
-                  id: "{{ subnet_id }}"
-                userDataSecret:
-                  name: worker-user-data
-                tags:
-                  - name: "kubernetes.io/cluster/{{ cluster_config.cluster_name }}"
-                    value: owned
-
-- name: Wait for machines to be provisioned
-  shell: |
-    oc get machine -n openshift-machine-api -l machine.openshift.io/cluster-api-machineset={{ cluster_config.cluster_name }}-{{ bare_metal_machineset_name }} \
-      -o jsonpath='{.items[*].status.phase}' | grep -o Running | wc -l
-  environment: "{{ kubeconfig_env }}"
-  register: running_machines
-  until: running_machines.stdout | int == bare_metal_replicas | int
-  retries: "{{ machineset_timeout_minutes | int }}"
+- name: Wait for all cluster machineset deployments to complete
+  async_status:
+    jid: "{{ item.job_id }}"
+  loop: "{{ async_jobs }}"
+  loop_control:
+    label: "{{ item.cluster }}"
+  register: async_results
+  until: async_results.finished
+  retries: 60
   delay: 60
-  changed_when: false
 
-- name: Verify CNV labels on nodes
+- name: Display deployment results
+  debug:
+    msg: "{{ item.stdout_lines }}"
+  loop: "{{ async_results.results }}"
+  loop_control:
+    label: "{{ item.item.cluster }}"
+
+- name: Verify CNV-labeled nodes on both clusters
   shell: |
+    export KUBECONFIG={{ item.install_dir }}/auth/kubeconfig
     oc get nodes -l node-role.kubernetes.io/worker-cnv --no-headers | wc -l
-  environment: "{{ kubeconfig_env }}"
-  register: cnv_nodes
+  loop: "{{ clusters }}"
+  loop_control:
+    label: "{{ item.cluster_name }}"
+  register: cnv_node_counts
   changed_when: false
 
-- name: Display bare metal machineset status
+- name: Display bare metal deployment summary
   debug:
     msg:
-      - "Bare metal machineset created for {{ cluster_config.cluster_name }}"
-      - "Instance type: {{ bare_metal_instance_type }}"
-      - "Replicas: {{ bare_metal_replicas }}"
-      - "CNV-labeled nodes: {{ cnv_nodes.stdout }}"
+      - "=========================================="
+      - "Bare Metal Deployment Complete"
+      - "=========================================="
+      - "MachineConfig: 98-worker-cnv-bgp-gateway"
+      - "  - Applied to: worker-cnv role"
+      - "  - Hub default gateway: {{ hub_router_ip }}"
+      - "  - Managed default gateway: {{ managed_router_ip }}"
+      - "  - Method: NetworkManager (nmcli)"
+      - "  - Script: /usr/local/bin/set-gw.sh"
+      - ""
+      - "MachineSets deployed in parallel to all clusters"
+      - "  - Instance type: {{ bare_metal_instance_type }}"
+      - "  - Replicas per cluster: {{ bare_metal_replicas }}"
+      - "  - Hub cluster CNV nodes: {{ cnv_node_counts.results[0].stdout }}"
+      - "  - Managed cluster CNV nodes: {{ cnv_node_counts.results[1].stdout }}"
+      - "  - Total bare metal nodes: {{ (cnv_node_counts.results[0].stdout | int) + (cnv_node_counts.results[1].stdout | int) }}"
+      - ""
+      - "Routing Configuration:"
+      - "  - Primary interface default gateway → BGP router"
+      - "  - Configured via NetworkManager connection"
+      - "  - BGP router handles external connectivity"
+      - "  - Applied automatically via MachineConfig"
+      - "  - Follows Red Hat solution guide"
+      - "=========================================="

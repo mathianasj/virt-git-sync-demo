@@ -1,0 +1,7 @@
+---
+# virt-git-sync operator defaults
+virtgitsync_namespace: virtgitsync
+virtgitsync_operator_name: virt-git-sync
+virtgitsync_operator_channel: alpha
+virtgitsync_operator_source: community-operators
+virtgitsync_policy_namespace: virtgitsync-policies

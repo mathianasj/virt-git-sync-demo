@@ -1,0 +1,5 @@
+---
+# OVN BGP defaults
+bgp_asn_hub: 64512
+bgp_asn_managed: 64513
+bgp_router_asn: 64500

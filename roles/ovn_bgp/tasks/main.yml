@@ -1,0 +1,561 @@
+---
+- name: Set kubeconfig environment
+  set_fact:
+    kubeconfig_env:
+      KUBECONFIG: "{{ hub_kubeconfig }}"
+
+- name: Get router private IPs for BGP peering (primary ENI)
+  shell: |
+    HUB_ROUTER=$(aws ec2 describe-instances \
+      --region {{ aws_region }} \
+      --filters "Name=tag:Name,Values=frr-router-hub" \
+                "Name=instance-state-name,Values=running" \
+      --query 'Reservations[0].Instances[0].PrivateIpAddress' \
+      --output text)
+
+    MANAGED_ROUTER=$(aws ec2 describe-instances \
+      --region {{ aws_region }} \
+      --filters "Name=tag:Name,Values=frr-router-managed" \
+                "Name=instance-state-name,Values=running" \
+      --query 'Reservations[0].Instances[0].PrivateIpAddress' \
+      --output text)
+
+    echo "$HUB_ROUTER $MANAGED_ROUTER"
+  register: router_ips
+  changed_when: false
+
+- name: Get router public subnet IPs for SSH access (secondary ENI)
+  shell: |
+    HUB_ROUTER_SSH=$(aws ec2 describe-instances \
+      --region {{ aws_region }} \
+      --filters "Name=tag:Name,Values=frr-router-hub" \
+                "Name=instance-state-name,Values=running" \
+      --query 'Reservations[0].Instances[0].NetworkInterfaces[?Attachment.DeviceIndex==`1`].PrivateIpAddress | [0]' \
+      --output text)
+
+    MANAGED_ROUTER_SSH=$(aws ec2 describe-instances \
+      --region {{ aws_region }} \
+      --filters "Name=tag:Name,Values=frr-router-managed" \
+                "Name=instance-state-name,Values=running" \
+      --query 'Reservations[0].Instances[0].NetworkInterfaces[?Attachment.DeviceIndex==`1`].PrivateIpAddress | [0]' \
+      --output text)
+
+    echo "$HUB_ROUTER_SSH $MANAGED_ROUTER_SSH"
+  register: router_ssh_ips
+  changed_when: false
+
+- name: Parse router IPs
+  set_fact:
+    hub_router_ip: "{{ router_ips.stdout.split()[0] }}"
+    managed_router_ip: "{{ router_ips.stdout.split()[1] }}"
+    hub_router_ssh_ip: "{{ router_ssh_ips.stdout.split()[0] }}"
+    managed_router_ssh_ip: "{{ router_ssh_ips.stdout.split()[1] }}"
+
+- name: Display BGP configuration overview
+  debug:
+    msg:
+      - "=========================================="
+      - "BGP Configuration"
+      - "=========================================="
+      - "Enabling FRR routing via Cluster Network Operator"
+      - ""
+      - "Hub Cluster:"
+      - "  ASN: {{ bgp_asn_hub }}"
+      - "  Router BGP IP (ens5): {{ hub_router_ip }}"
+      - "  Router SSH IP (ens6): {{ hub_router_ssh_ip }}"
+      - ""
+      - "Managed Cluster:"
+      - "  ASN: {{ bgp_asn_managed }}"
+      - "  Router BGP IP (ens5): {{ managed_router_ip }}"
+      - "  Router SSH IP (ens6): {{ managed_router_ssh_ip }}"
+      - ""
+      - "Router ASN: {{ bgp_router_asn }}"
+      - "=========================================="
+
+- name: Enable FRR routing and route advertisements on hub cluster
+  shell: |
+    oc patch Network.operator.openshift.io/cluster --type=merge \
+      -p '{
+        "spec": {
+          "additionalRoutingCapabilities": {
+            "providers": ["FRR"]
+          },
+          "defaultNetwork": {
+            "ovnKubernetesConfig": {
+              "routeAdvertisements": "Enabled"
+            }
+          }
+        }
+      }'
+  environment:
+    KUBECONFIG: "{{ clusters[0].install_dir }}/auth/kubeconfig"
+  register: enable_frr_hub
+  changed_when: "'no change' not in enable_frr_hub.stdout"
+  failed_when: false
+
+- name: Enable FRR routing and route advertisements on managed cluster
+  shell: |
+    oc patch Network.operator.openshift.io/cluster --type=merge \
+      -p '{
+        "spec": {
+          "additionalRoutingCapabilities": {
+            "providers": ["FRR"]
+          },
+          "defaultNetwork": {
+            "ovnKubernetesConfig": {
+              "routeAdvertisements": "Enabled"
+            }
+          }
+        }
+      }'
+  environment:
+    KUBECONFIG: "{{ clusters[1].install_dir }}/auth/kubeconfig"
+  register: enable_frr_managed
+  changed_when: "'no change' not in enable_frr_managed.stdout"
+  failed_when: false
+
+- name: Wait for FRR daemonset on hub cluster
+  shell: |
+    oc get daemonset frr-k8s -n openshift-frr-k8s -o jsonpath='{.status.numberReady}' 2>/dev/null || echo "0"
+  environment:
+    KUBECONFIG: "{{ clusters[0].install_dir }}/auth/kubeconfig"
+  register: frr_hub_ready
+  until: frr_hub_ready.stdout | int > 0
+  retries: 30
+  delay: 10
+  changed_when: false
+
+- name: Wait for FRR daemonset on managed cluster
+  shell: |
+    oc get daemonset frr-k8s -n openshift-frr-k8s -o jsonpath='{.status.numberReady}' 2>/dev/null || echo "0"
+  environment:
+    KUBECONFIG: "{{ clusters[1].install_dir }}/auth/kubeconfig"
+  register: frr_managed_ready
+  until: frr_managed_ready.stdout | int > 0
+  retries: 30
+  delay: 10
+  changed_when: false
+
+- name: Wait for RouteAdvertisements CRD to be created on hub cluster
+  shell: |
+    oc get crd routeadvertisements.k8s.ovn.org 2>/dev/null && echo "exists" || echo "missing"
+  environment:
+    KUBECONFIG: "{{ clusters[0].install_dir }}/auth/kubeconfig"
+  register: routeadv_crd_hub
+  until: "'exists' in routeadv_crd_hub.stdout"
+  retries: 20
+  delay: 10
+  changed_when: false
+  failed_when: false
+
+- name: Wait for RouteAdvertisements CRD to be created on managed cluster
+  shell: |
+    oc get crd routeadvertisements.k8s.ovn.org 2>/dev/null && echo "exists" || echo "missing"
+  environment:
+    KUBECONFIG: "{{ clusters[1].install_dir }}/auth/kubeconfig"
+  register: routeadv_crd_managed
+  until: "'exists' in routeadv_crd_managed.stdout"
+  retries: 20
+  delay: 10
+  changed_when: false
+  failed_when: false
+
+- name: Display RouteAdvertisements CRD status
+  debug:
+    msg:
+      - "RouteAdvertisements CRD Status:"
+      - "  Hub cluster: {{ 'Available' if 'exists' in routeadv_crd_hub.stdout else 'Not available (may require newer OpenShift version)' }}"
+      - "  Managed cluster: {{ 'Available' if 'exists' in routeadv_crd_managed.stdout else 'Not available (may require newer OpenShift version)' }}"
+      - "{{ 'Note: Continuing with FRRConfiguration-based BGP (RouteAdvertisements not required)' if 'missing' in routeadv_crd_hub.stdout else '' }}"
+
+- name: Create FRRConfiguration for hub cluster (bare metal nodes only)
+  kubernetes.core.k8s:
+    kubeconfig: "{{ clusters[0].install_dir }}/auth/kubeconfig"
+    state: present
+    definition:
+      apiVersion: frrk8s.metallb.io/v1beta1
+      kind: FRRConfiguration
+      metadata:
+        name: hub-bgp-peering
+        namespace: openshift-frr-k8s
+      spec:
+        nodeSelector:
+          matchLabels:
+            node-role.kubernetes.io/worker-cnv: ""
+        bgp:
+          routers:
+            - asn: "{{ bgp_asn_hub }}"
+              neighbors:
+                - address: "{{ hub_router_ip }}"
+                  asn: "{{ bgp_router_asn }}"
+                  port: 179
+                  disableMP: true
+                  toReceive:
+                    allowed:
+                      mode: all
+
+- name: Create FRRConfiguration for managed cluster (bare metal nodes only)
+  kubernetes.core.k8s:
+    kubeconfig: "{{ clusters[1].install_dir }}/auth/kubeconfig"
+    state: present
+    definition:
+      apiVersion: frrk8s.metallb.io/v1beta1
+      kind: FRRConfiguration
+      metadata:
+        name: managed-bgp-peering
+        namespace: openshift-frr-k8s
+      spec:
+        nodeSelector:
+          matchLabels:
+            node-role.kubernetes.io/worker-cnv: ""
+        bgp:
+          routers:
+            - asn: "{{ bgp_asn_managed }}"
+              neighbors:
+                - address: "{{ managed_router_ip }}"
+                  asn: "{{ bgp_router_asn }}"
+                  port: 179
+                  disableMP: true
+                  toReceive:
+                    allowed:
+                      mode: all
+
+- name: Get hub cluster bare metal node IPs for FRR router configuration (c5.metal only)
+  shell: |
+    oc get nodes -l node-role.kubernetes.io/worker-cnv -o json | \
+    jq -r '.items[] | select(.metadata.labels."beta.kubernetes.io/instance-type" == "c5.metal") | .status.addresses[] | select(.type=="InternalIP") | .address'
+  environment:
+    KUBECONFIG: "{{ clusters[0].install_dir }}/auth/kubeconfig"
+  register: hub_node_ips
+  changed_when: false
+
+- name: Get managed cluster bare metal node IPs for FRR router configuration (c5.metal only)
+  shell: |
+    oc get nodes -l node-role.kubernetes.io/worker-cnv -o json | \
+    jq -r '.items[] | select(.metadata.labels."beta.kubernetes.io/instance-type" == "c5.metal") | .status.addresses[] | select(.type=="InternalIP") | .address'
+  environment:
+    KUBECONFIG: "{{ clusters[1].install_dir }}/auth/kubeconfig"
+  register: managed_node_ips
+  changed_when: false
+
+- name: Install FRR on hub router if not already installed
+  shell: |
+    ssh -i ~/.ssh/{{ bastion_key_name }} \
+        -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null \
+        {{ router_user }}@{{ hub_router_ssh_ip }} "
+      if ! sudo systemctl status frr >/dev/null 2>&1; then
+        # Enable SPAL repository and install FRR
+        sudo dnf install -y spal-release &&
+        sudo dnf install -y frr &&
+        # Enable BGP and Zebra daemons
+        sudo sed -i 's/^bgpd=no/bgpd=yes/' /etc/frr/daemons &&
+        sudo sed -i 's/^zebra=no/zebra=yes/' /etc/frr/daemons &&
+        # Enable and start FRR service
+        sudo systemctl enable frr &&
+        sudo systemctl start frr &&
+        sleep 10 &&
+        sudo systemctl restart frr &&
+        sleep 10
+      fi
+    "
+  changed_when: true
+
+- name: Configure BGP on hub router
+  shell: |
+    ssh -i ~/.ssh/{{ bastion_key_name }} \
+        -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null \
+        {{ router_user }}@{{ hub_router_ssh_ip }} "
+      sudo vtysh -c 'configure terminal' \
+        -c 'ip prefix-list ALLOW-192-168-100 permit 192.168.100.0/24' \
+        -c 'route-map ALLOW-IN permit 10' \
+        -c 'match ip address prefix-list ALLOW-192-168-100' \
+        -c 'exit' \
+        -c 'router bgp {{ bgp_router_asn }}' \
+        -c 'bgp router-id {{ hub_router_ip }}' \
+        {% for node_ip in hub_node_ips.stdout_lines %}
+        -c 'neighbor {{ node_ip }} remote-as {{ bgp_asn_hub }}' \
+        -c 'neighbor {{ node_ip }} description Hub-Node-{{ loop.index }}' \
+        -c 'neighbor {{ node_ip }} route-map ALLOW-IN in' \
+        -c 'neighbor {{ node_ip }} default-originate' \
+        {% endfor %}
+        -c 'exit'
+    "
+  changed_when: true
+
+- name: Install FRR on managed router if not already installed
+  shell: |
+    ssh -i ~/.ssh/{{ bastion_key_name }} \
+        -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null \
+        {{ router_user }}@{{ managed_router_ssh_ip }} "
+      if ! sudo systemctl status frr >/dev/null 2>&1; then
+        # Enable SPAL repository and install FRR
+        sudo dnf install -y spal-release &&
+        sudo dnf install -y frr &&
+        # Enable BGP and Zebra daemons
+        sudo sed -i 's/^bgpd=no/bgpd=yes/' /etc/frr/daemons &&
+        sudo sed -i 's/^zebra=no/zebra=yes/' /etc/frr/daemons &&
+        # Enable and start FRR service
+        sudo systemctl enable frr &&
+        sudo systemctl start frr &&
+        sleep 10 &&
+        sudo systemctl restart frr &&
+        sleep 10
+      fi
+    "
+  changed_when: true
+
+- name: Configure BGP on managed router
+  shell: |
+    ssh -i ~/.ssh/{{ bastion_key_name }} \
+        -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null \
+        {{ router_user }}@{{ managed_router_ssh_ip }} "
+      sudo vtysh -c 'configure terminal' \
+        -c 'ip prefix-list ALLOW-192-168-100 permit 192.168.100.0/24' \
+        -c 'route-map ALLOW-IN permit 10' \
+        -c 'match ip address prefix-list ALLOW-192-168-100' \
+        -c 'exit' \
+        -c 'router bgp {{ bgp_router_asn }}' \
+        -c 'bgp router-id {{ managed_router_ip }}' \
+        {% for node_ip in managed_node_ips.stdout_lines %}
+        -c 'neighbor {{ node_ip }} remote-as {{ bgp_asn_managed }}' \
+        -c 'neighbor {{ node_ip }} description Managed-Node-{{ loop.index }}' \
+        -c 'neighbor {{ node_ip }} route-map ALLOW-IN in' \
+        -c 'neighbor {{ node_ip }} default-originate' \
+        {% endfor %}
+        -c 'exit'
+    "
+  changed_when: true
+
+- name: Get hub router instance ID
+  shell: |
+    aws ec2 describe-instances \
+      --region {{ aws_region }} \
+      --filters "Name=tag:Name,Values=frr-router-hub" \
+                "Name=instance-state-name,Values=running" \
+      --query 'Reservations[0].Instances[0].InstanceId' \
+      --output text
+  register: hub_router_instance_id
+  changed_when: false
+
+- name: Get managed router instance ID
+  shell: |
+    aws ec2 describe-instances \
+      --region {{ aws_region }} \
+      --filters "Name=tag:Name,Values=frr-router-managed" \
+                "Name=instance-state-name,Values=running" \
+      --query 'Reservations[0].Instances[0].InstanceId' \
+      --output text
+  register: managed_router_instance_id
+  changed_when: false
+
+- name: Get hub router primary ENI ID (for VPC routing)
+  shell: |
+    aws ec2 describe-instances \
+      --region {{ aws_region }} \
+      --filters "Name=tag:Name,Values=frr-router-hub" \
+                "Name=instance-state-name,Values=running" \
+      --query 'Reservations[0].Instances[0].NetworkInterfaces[?Attachment.DeviceIndex==`0`].NetworkInterfaceId | [0]' \
+      --output text
+  register: hub_router_eni_id
+  changed_when: false
+
+- name: Get managed router primary ENI ID (for VPC routing)
+  shell: |
+    aws ec2 describe-instances \
+      --region {{ aws_region }} \
+      --filters "Name=tag:Name,Values=frr-router-managed" \
+                "Name=instance-state-name,Values=running" \
+      --query 'Reservations[0].Instances[0].NetworkInterfaces[?Attachment.DeviceIndex==`0`].NetworkInterfaceId | [0]' \
+      --output text
+  register: managed_router_eni_id
+  changed_when: false
+
+- name: Get hub cluster VPC ID and route tables
+  shell: |
+    aws ec2 describe-instances \
+      --region {{ aws_region }} \
+      --filters "Name=instance-type,Values=c5.metal" \
+                "Name=instance-state-name,Values=running" \
+                "Name=tag:Name,Values=*hub*" \
+      --query 'Reservations[0].Instances[0].{VpcId:VpcId,SubnetId:SubnetId}' \
+      --output json
+  register: hub_network_info
+  changed_when: false
+
+- name: Get managed cluster VPC ID and route tables
+  shell: |
+    aws ec2 describe-instances \
+      --region {{ aws_region }} \
+      --filters "Name=instance-type,Values=c5.metal" \
+                "Name=instance-state-name,Values=running" \
+                "Name=tag:Name,Values=*managed*" \
+      --query 'Reservations[0].Instances[0].{VpcId:VpcId,SubnetId:SubnetId}' \
+      --output json
+  register: managed_network_info
+  changed_when: false
+
+- name: Parse network info
+  set_fact:
+    hub_vpc_id: "{{ (hub_network_info.stdout | from_json).VpcId }}"
+    hub_subnet_id: "{{ (hub_network_info.stdout | from_json).SubnetId }}"
+    managed_vpc_id: "{{ (managed_network_info.stdout | from_json).VpcId }}"
+    managed_subnet_id: "{{ (managed_network_info.stdout | from_json).SubnetId }}"
+
+- name: Get hub cluster route table ID
+  shell: |
+    aws ec2 describe-route-tables \
+      --region {{ aws_region }} \
+      --filters "Name=association.subnet-id,Values={{ hub_subnet_id }}" \
+      --query 'RouteTables[0].RouteTableId' \
+      --output text
+  register: hub_route_table_id
+  changed_when: false
+
+- name: Get managed cluster route table ID
+  shell: |
+    aws ec2 describe-route-tables \
+      --region {{ aws_region }} \
+      --filters "Name=association.subnet-id,Values={{ managed_subnet_id }}" \
+      --query 'RouteTables[0].RouteTableId' \
+      --output text
+  register: managed_route_table_id
+  changed_when: false
+
+- name: Add route for 192.168.100.0/24 to hub router in hub VPC route table
+  shell: |
+    aws ec2 create-route \
+      --region {{ aws_region }} \
+      --route-table-id {{ hub_route_table_id.stdout }} \
+      --destination-cidr-block 192.168.100.0/24 \
+      --network-interface-id {{ hub_router_eni_id.stdout }} 2>&1 || \
+    aws ec2 replace-route \
+      --region {{ aws_region }} \
+      --route-table-id {{ hub_route_table_id.stdout }} \
+      --destination-cidr-block 192.168.100.0/24 \
+      --network-interface-id {{ hub_router_eni_id.stdout }}
+  register: hub_route_result
+  changed_when: "'CreateRouteResponse' in hub_route_result.stdout or 'true' in hub_route_result.stdout"
+
+- name: Add route for 192.168.100.0/24 to managed router in managed VPC route table
+  shell: |
+    aws ec2 create-route \
+      --region {{ aws_region }} \
+      --route-table-id {{ managed_route_table_id.stdout }} \
+      --destination-cidr-block 192.168.100.0/24 \
+      --network-interface-id {{ managed_router_eni_id.stdout }} 2>&1 || \
+    aws ec2 replace-route \
+      --region {{ aws_region }} \
+      --route-table-id {{ managed_route_table_id.stdout }} \
+      --destination-cidr-block 192.168.100.0/24 \
+      --network-interface-id {{ managed_router_eni_id.stdout }}
+  register: managed_route_result
+  changed_when: "'CreateRouteResponse' in managed_route_result.stdout or 'true' in managed_route_result.stdout"
+
+- name: Display BGP configuration status
+  debug:
+    msg:
+      - "=========================================="
+      - "BGP Configuration Complete"
+      - "=========================================="
+      - "FRR routing enabled via Cluster Network Operator"
+      - ""
+      - "Hub Cluster:"
+      - "  FRR pods running: {{ frr_hub_ready.stdout }}"
+      - "  BGP ASN: {{ bgp_asn_hub }}"
+      - "  Router peer: {{ hub_router_ip }} (ASN {{ bgp_router_asn }})"
+      - "  Router instance: {{ hub_router_instance_id.stdout }}"
+      - "  Router primary ENI: {{ hub_router_eni_id.stdout }}"
+      - "  FRRConfiguration: hub-bgp-peering (bare metal nodes only)"
+      - "  Bare metal nodes: {{ hub_node_ips.stdout_lines | length }}"
+      - "  VPC route: 192.168.100.0/24 -> ENI {{ hub_router_eni_id.stdout }}"
+      - ""
+      - "Managed Cluster:"
+      - "  FRR pods running: {{ frr_managed_ready.stdout }}"
+      - "  BGP ASN: {{ bgp_asn_managed }}"
+      - "  Router peer: {{ managed_router_ip }} (ASN {{ bgp_router_asn }})"
+      - "  Router instance: {{ managed_router_instance_id.stdout }}"
+      - "  Router primary ENI: {{ managed_router_eni_id.stdout }}"
+      - "  FRRConfiguration: managed-bgp-peering (bare metal nodes only)"
+      - "  Bare metal nodes: {{ managed_node_ips.stdout_lines | length }}"
+      - "  VPC route: 192.168.100.0/24 -> ENI {{ managed_router_eni_id.stdout }}"
+      - ""
+      - "Verification commands:"
+      - "  Check FRR pods: oc get pods -n openshift-frr-k8s"
+      - "  Check FRRConfig: oc get frrconfiguration -n openshift-frr-k8s -o yaml"
+      - "  Router BGP status (hub): ssh {{ router_user }}@{{ hub_router_ssh_ip }} 'sudo vtysh -c \"show ip bgp summary\"'"
+      - "  Router BGP status (managed): ssh {{ router_user }}@{{ managed_router_ssh_ip }} 'sudo vtysh -c \"show ip bgp summary\"'"
+      - ""
+      - "Note: BGP peering on bare metal nodes only, prefix filter allows 192.168.100.0/24"
+      - "VPC routing configured to send 192.168.100.0/24 traffic to BGP routers"
+      - "=========================================="
+
+- name: Wait for BGP sessions to establish on routers
+  pause:
+    seconds: 30
+    prompt: "Waiting 30 seconds for BGP sessions to establish..."
+
+- name: Validate BGP peering on hub router
+  shell: |
+    ssh -i ~/.ssh/{{ bastion_key_name }} \
+        -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null \
+        {{ router_user }}@{{ hub_router_ssh_ip }} \
+        'sudo vtysh -c "show ip bgp summary"'
+  register: hub_bgp_validation
+  changed_when: false
+
+- name: Validate BGP peering on managed router
+  shell: |
+    ssh -i ~/.ssh/{{ bastion_key_name }} \
+        -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null \
+        {{ router_user }}@{{ managed_router_ssh_ip }} \
+        'sudo vtysh -c "show ip bgp summary"'
+  register: managed_bgp_validation
+  changed_when: false
+
+- name: Check hub router BGP sessions
+  assert:
+    that:
+      - "'Total number of neighbors' in hub_bgp_validation.stdout"
+      - hub_bgp_validation.stdout is not search('Active')
+      - hub_bgp_validation.stdout is not search('Idle')
+      - hub_bgp_validation.stdout is search('Hub-Node-1')
+      - hub_bgp_validation.stdout is search('Hub-Node-2')
+    fail_msg: |
+      Hub router BGP sessions are not established.
+      Output: {{ hub_bgp_validation.stdout }}
+    success_msg: "Hub router BGP sessions are established"
+
+- name: Check managed router BGP sessions
+  assert:
+    that:
+      - "'Total number of neighbors' in managed_bgp_validation.stdout"
+      - managed_bgp_validation.stdout is not search('Active')
+      - managed_bgp_validation.stdout is not search('Idle')
+      - managed_bgp_validation.stdout is search('Managed-Node-1')
+      - managed_bgp_validation.stdout is search('Managed-Node-2')
+    fail_msg: |
+      Managed router BGP sessions are not established.
+      Output: {{ managed_bgp_validation.stdout }}
+    success_msg: "Managed router BGP sessions are established"
+
+- name: Display BGP peering validation summary
+  debug:
+    msg:
+      - "=========================================="
+      - "BGP Peering Validation Complete"
+      - "=========================================="
+      - "✅ Hub cluster: All BGP sessions established"
+      - "✅ Managed cluster: All BGP sessions established"
+      - ""
+      - "Hub Router BGP Summary:"
+      - "{{ hub_bgp_validation.stdout_lines | select('search', 'Neighbor|Total') | list | join('\n') }}"
+      - ""
+      - "Managed Router BGP Summary:"
+      - "{{ managed_bgp_validation.stdout_lines | select('search', 'Neighbor|Total') | list | join('\n') }}"
+      - "=========================================="

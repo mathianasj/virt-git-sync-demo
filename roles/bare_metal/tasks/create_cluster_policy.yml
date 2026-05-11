@@ -1,0 +1,132 @@
+---
+- name: Gather machineset details from {{ target_cluster.cluster_name }}
+  shell: |
+    export KUBECONFIG={{ target_cluster.install_dir }}/auth/kubeconfig
+    oc get machineset.machine.openshift.io -n openshift-machine-api -o json | jq '.items[0]'
+  register: base_machineset
+  changed_when: false
+
+- name: Parse base machineset for {{ target_cluster.cluster_name }}
+  set_fact:
+    ms_json: "{{ base_machineset.stdout | from_json }}"
+
+- name: Extract cluster details for {{ target_cluster.cluster_name }}
+  set_fact:
+    cluster_infra_id: "{{ ms_json.metadata.labels['machine.openshift.io/cluster-api-cluster'] }}"
+    cluster_ami_id: "{{ ms_json.spec.template.spec.providerSpec.value.ami.id }}"
+    cluster_iam_profile: "{{ ms_json.spec.template.spec.providerSpec.value.iamInstanceProfile.id }}"
+    cluster_security_groups: "{{ ms_json.spec.template.spec.providerSpec.value.securityGroups }}"
+    cluster_subnet: "{{ ms_json.spec.template.spec.providerSpec.value.subnet }}"
+    cluster_region: "{{ ms_json.spec.template.spec.providerSpec.value.placement.region }}"
+    managed_cluster_name: "{{ 'local-cluster' if target_cluster.cluster_name == 'hub' else target_cluster.cluster_name }}"
+
+- name: Create Placement for {{ target_cluster.cluster_name }}
+  kubernetes.core.k8s:
+    kubeconfig: "{{ hub_kubeconfig }}"
+    state: present
+    definition:
+      apiVersion: cluster.open-cluster-management.io/v1beta1
+      kind: Placement
+      metadata:
+        name: "placement-{{ target_cluster.cluster_name }}"
+        namespace: bare-metal-policies
+      spec:
+        predicates:
+        - requiredClusterSelector:
+            labelSelector:
+              matchLabels:
+                name: "{{ managed_cluster_name }}"
+
+- name: Create Policy for {{ target_cluster.cluster_name }} bare metal machineset
+  kubernetes.core.k8s:
+    kubeconfig: "{{ hub_kubeconfig }}"
+    state: present
+    definition:
+      apiVersion: policy.open-cluster-management.io/v1
+      kind: Policy
+      metadata:
+        name: "bare-metal-machineset-{{ target_cluster.cluster_name }}"
+        namespace: bare-metal-policies
+      spec:
+        disabled: false
+        remediationAction: enforce
+        policy-templates:
+        - objectDefinition:
+            apiVersion: policy.open-cluster-management.io/v1
+            kind: ConfigurationPolicy
+            metadata:
+              name: "bare-metal-machineset-{{ target_cluster.cluster_name }}-config"
+            spec:
+              remediationAction: enforce
+              severity: high
+              object-templates:
+              - complianceType: musthave
+                objectDefinition:
+                  apiVersion: machine.openshift.io/v1beta1
+                  kind: MachineSet
+                  metadata:
+                    name: "{{ cluster_infra_id }}-{{ bare_metal_machineset_name }}"
+                    namespace: openshift-machine-api
+                    labels:
+                      machine.openshift.io/cluster-api-cluster: "{{ cluster_infra_id }}"
+                  spec:
+                    replicas: "{{ bare_metal_replicas }}"
+                    selector:
+                      matchLabels:
+                        machine.openshift.io/cluster-api-cluster: "{{ cluster_infra_id }}"
+                        machine.openshift.io/cluster-api-machineset: "{{ cluster_infra_id }}-{{ bare_metal_machineset_name }}"
+                    template:
+                      metadata:
+                        labels:
+                          machine.openshift.io/cluster-api-cluster: "{{ cluster_infra_id }}"
+                          machine.openshift.io/cluster-api-machine-role: worker
+                          machine.openshift.io/cluster-api-machine-type: worker
+                          machine.openshift.io/cluster-api-machineset: "{{ cluster_infra_id }}-{{ bare_metal_machineset_name }}"
+                          node-role.kubernetes.io/worker-cnv: ""
+                      spec:
+                        metadata:
+                          labels:
+                            node-role.kubernetes.io/worker-cnv: ""
+                        providerSpec:
+                          value:
+                            apiVersion: machine.openshift.io/v1beta1
+                            kind: AWSMachineProviderConfig
+                            ami:
+                              id: "{{ cluster_ami_id }}"
+                            instanceType: "{{ bare_metal_instance_type }}"
+                            placement:
+                              region: "{{ cluster_region }}"
+                              availabilityZone: "{{ cluster_region }}a"
+                            iamInstanceProfile:
+                              id: "{{ cluster_iam_profile }}"
+                            securityGroups: {{ cluster_security_groups }}
+                            subnet: {{ cluster_subnet }}
+                            userDataSecret:
+                              name: worker-user-data
+                            tags:
+                            - name: "kubernetes.io/cluster/{{ cluster_infra_id }}"
+                              value: owned
+
+- name: Create PlacementBinding for {{ target_cluster.cluster_name }}
+  kubernetes.core.k8s:
+    kubeconfig: "{{ hub_kubeconfig }}"
+    state: present
+    definition:
+      apiVersion: policy.open-cluster-management.io/v1
+      kind: PlacementBinding
+      metadata:
+        name: "bare-metal-machineset-binding-{{ target_cluster.cluster_name }}"
+        namespace: bare-metal-policies
+      spec:
+        placementRef:
+          apiGroup: cluster.open-cluster-management.io
+          kind: Placement
+          name: "placement-{{ target_cluster.cluster_name }}"
+        subjects:
+        - apiGroup: policy.open-cluster-management.io
+          kind: Policy
+          name: "bare-metal-machineset-{{ target_cluster.cluster_name }}"
+
+- name: Display policy created for {{ target_cluster.cluster_name }}
+  debug:
+    msg: "Created ACM policy for {{ target_cluster.cluster_name }} bare metal machineset"

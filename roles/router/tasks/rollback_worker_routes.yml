@@ -1,0 +1,82 @@
+---
+# Rollback worker route tables to original NAT Gateway routes
+# Restores routes from backup files created during route update
+
+- name: Check if route backups exist
+  stat:
+    path: "{{ route_backup_dir | default('/tmp/route-backups') }}/{{ cluster_name }}-{{ item.route_table_id }}.json"
+  loop: "{{ worker_route_tables }}"
+  loop_control:
+    label: "{{ item.route_table_id }}"
+  register: backup_files
+  delegate_to: localhost
+
+- name: Display backup file status
+  debug:
+    msg:
+      - "Route Backup Status:"
+      - "{% for result in backup_files.results %}Route Table {{ result.item.route_table_id }}: {{ 'Backup Found' if result.stat.exists else 'NO BACKUP' }}{% endfor %}"
+
+- name: Warn about missing backups
+  debug:
+    msg:
+      - "WARNING: No backup found for route table {{ item.item.route_table_id }}"
+      - "Cannot restore original route - manual intervention may be required"
+  loop: "{{ backup_files.results }}"
+  loop_control:
+    label: "{{ item.item.route_table_id }}"
+  when: not item.stat.exists
+
+- name: Rollback route tables with backups
+  include_tasks: rollback_single_route_table.yml
+  vars:
+    subnet_id: "{{ item.item.subnet_id }}"
+    route_table_id: "{{ item.item.route_table_id }}"
+    route_table_name: "{{ item.item.name }}"
+    backup_file: "{{ route_backup_dir | default('/tmp/route-backups') }}/{{ cluster_name }}-{{ item.item.route_table_id }}.json"
+  loop: "{{ backup_files.results }}"
+  loop_control:
+    label: "{{ item.item.route_table_id }}"
+  when: item.stat.exists
+
+- name: Wait for route changes to propagate
+  pause:
+    seconds: 10
+    prompt: "Waiting for VPC route table rollback to propagate..."
+
+- name: Verify rollback completed successfully
+  shell: |
+    aws ec2 describe-route-tables \
+      --region {{ aws_region }} \
+      --route-table-ids {{ item.item.route_table_id }} \
+      --query 'RouteTables[0].Routes[?DestinationCidrBlock==`0.0.0.0/0`]' \
+      --output json
+  loop: "{{ backup_files.results }}"
+  loop_control:
+    label: "{{ item.item.route_table_id }}"
+  register: rollback_verification
+  changed_when: false
+  delegate_to: localhost
+  when: item.stat.exists
+
+- name: Display rollback verification
+  debug:
+    msg:
+      - "=========================================="
+      - "Rollback Verification - {{ cluster_name }}"
+      - "=========================================="
+      - "{% for result in rollback_verification.results %}{% if not result.skipped | default(false) %}Route Table {{ result.item.item.route_table_id }}:{% endif %}{% endfor %}"
+      - "  Restored Route: {{ result.stdout | from_json }}"
+      - ""
+  when: rollback_verification is defined
+
+- name: Rollback summary
+  debug:
+    msg:
+      - "=========================================="
+      - "Rollback Complete - {{ cluster_name }}"
+      - "=========================================="
+      - "Rolled back {{ backup_files.results | selectattr('stat.exists') | list | length }} route table(s)"
+      - ""
+      - "Worker nodes now route via original NAT Gateways"
+      - "BGP router is no longer in the data path"

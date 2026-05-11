@@ -1,0 +1,109 @@
+---
+# Security groups for multi-VPC setup with peering
+
+- name: Create bastion security group
+  amazon.aws.ec2_security_group:
+    name: "{{ bastion_vpc.name }}-bastion-sg"
+    description: Security group for bastion host
+    vpc_id: "{{ bastion_vpc_id }}"
+    region: "{{ aws_region }}"
+    tags:
+      Name: "{{ bastion_vpc.name }}-bastion-sg"
+      Project: openshift-dual-cluster
+    rules:
+      - proto: tcp
+        ports: 22
+        cidr_ip: 0.0.0.0/0
+      - proto: -1
+        cidr_ip: "{{ bastion_vpc.cidr }}"
+      - proto: -1
+        cidr_ip: "{{ vpcs[0].cidr }}"
+      - proto: -1
+        cidr_ip: "{{ vpcs[1].cidr }}"
+    rules_egress:
+      - proto: -1
+        cidr_ip: 0.0.0.0/0
+    purge_rules: no
+    purge_rules_egress: no
+    state: present
+  register: bastion_sg
+
+- name: Set bastion security group ID fact
+  set_fact:
+    bastion_sg_id: "{{ bastion_sg.group_id }}"
+
+- name: Check if cluster security groups exist
+  shell: |
+    aws ec2 describe-security-groups \
+      --region {{ aws_region }} \
+      --filters "Name=group-name,Values={{ item.name }}-cluster-sg" "Name=vpc-id,Values={{ vpc_map[item.name] }}" \
+      --query 'SecurityGroups[0].GroupId' \
+      --output text
+  loop: "{{ vpcs }}"
+  register: existing_cluster_sgs
+  changed_when: false
+  failed_when: false
+
+- name: Create OpenShift cluster security groups for each VPC
+  amazon.aws.ec2_security_group:
+    name: "{{ item.item.name }}-cluster-sg"
+    description: "Security group for {{ item.item.cluster }} cluster"
+    vpc_id: "{{ vpc_map[item.item.name] }}"
+    region: "{{ aws_region }}"
+    tags:
+      Name: "{{ item.item.name }}-cluster-sg"
+      Project: openshift-dual-cluster
+      Cluster: "{{ item.item.cluster }}"
+    rules:
+      - proto: tcp
+        ports: 443
+        cidr_ip: 0.0.0.0/0
+      - proto: tcp
+        ports: 80
+        cidr_ip: 0.0.0.0/0
+      - proto: -1
+        cidr_ip: "{{ item.item.cidr }}"
+      - proto: -1
+        cidr_ip: "{{ bastion_vpc.cidr }}"
+      - proto: -1
+        cidr_ip: "{{ vpcs[0].cidr }}"
+      - proto: -1
+        cidr_ip: "{{ vpcs[1].cidr }}"
+    rules_egress:
+      - proto: -1
+        cidr_ip: 0.0.0.0/0
+    purge_rules: no
+    purge_rules_egress: no
+    state: present
+  loop: "{{ existing_cluster_sgs.results }}"
+  when: item.stdout == "None" or item.stdout == ""
+  register: cluster_sgs_created
+
+- name: Get cluster security group IDs
+  shell: |
+    aws ec2 describe-security-groups \
+      --region {{ aws_region }} \
+      --filters "Name=group-name,Values={{ item.name }}-cluster-sg" "Name=vpc-id,Values={{ vpc_map[item.name] }}" \
+      --query 'SecurityGroups[0].GroupId' \
+      --output text
+  loop: "{{ vpcs }}"
+  register: cluster_sgs_final
+  changed_when: false
+
+- name: Set cluster security group facts
+  set_fact:
+    cluster_sg_map: |
+      {% set sg_dict = {} %}
+      {% for result in cluster_sgs_final.results %}
+      {% set _ = sg_dict.update({result.item.name: result.stdout}) %}
+      {% endfor %}
+      {{ sg_dict }}
+    hub_cluster_sg_id: "{{ cluster_sgs_final.results[0].stdout }}"
+    managed_cluster_sg_id: "{{ cluster_sgs_final.results[1].stdout }}"
+
+- name: Display security group information
+  debug:
+    msg:
+      - "Bastion SG: {{ bastion_sg_id }}"
+      - "Hub Cluster SG: {{ hub_cluster_sg_id }}"
+      - "Managed Cluster SG: {{ managed_cluster_sg_id }}"

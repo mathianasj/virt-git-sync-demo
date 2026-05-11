@@ -1,0 +1,40 @@
+---
+- name: Set kubeconfig environment
+  set_fact:
+    kubeconfig_env:
+      KUBECONFIG: "{{ hub_kubeconfig }}"
+
+- name: Create namespace for virt-git-sync policies
+  kubernetes.core.k8s:
+    kubeconfig: "{{ hub_kubeconfig }}"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ virtgitsync_policy_namespace }}"
+
+- name: Include Gitea repository creation tasks
+  include_tasks: gitea_repo.yml
+
+- name: Include operator policy creation tasks (both clusters)
+  include_tasks: operator_policy.yml
+
+- name: Include CR policy creation tasks (active cluster only)
+  include_tasks: cr_policy.yml
+
+- name: Display virt-git-sync deployment status
+  debug:
+    msg:
+      - "virt-git-sync deployed successfully with DR failover capability"
+      - "Operator Policy: policy-virt-git-sync-operator (both clusters)"
+      - "CR Policy: policy-virt-git-sync-cr (active cluster only)"
+      - "Namespace: {{ virtgitsync_namespace }}"
+      - "Operator: {{ virtgitsync_operator_name }}"
+      - ""
+      - "Deployment Strategy:"
+      - "  - Operator installed on BOTH clusters (ready for failover)"
+      - "  - VirtGitSync CR deployed to ACTIVE cluster only"
+      - "  - Active cluster controlled by 'virtgitsync-active=true' label"
+      - ""
+      - "Gitea repository: https://gitea-{{ gitea_namespace }}.apps.hub.{{ selected_base_domain }}/{{ gitea_admin_user }}/vms"

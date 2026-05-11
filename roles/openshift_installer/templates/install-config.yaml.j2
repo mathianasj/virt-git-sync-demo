@@ -38,7 +38,17 @@ networking:
 platform:
   aws:
     region: {{ aws_region }}
+{% if cluster_config.vpc_name is defined %}
+    subnets:
+{% for subnet_id in vpc_public_subnets[cluster_config.vpc_name] %}
+      - {{ subnet_id }}
+{% endfor %}
+{% for subnet_id in vpc_private_subnets[cluster_config.vpc_name] %}
+      - {{ subnet_id }}
+{% endfor %}
+{% endif %}
+credentialsMode: Passthrough
 publish: External
-pullSecret: '{{ pull_secret_content }}'
+pullSecret: {{ pull_secret_content | tojson }}
 sshKey: |
   {{ ssh_public_key_content }}

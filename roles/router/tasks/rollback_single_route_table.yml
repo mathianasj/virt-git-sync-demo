@@ -1,0 +1,79 @@
+---
+# Rollback a single route table from backup
+# This file is included by rollback_worker_routes.yml
+
+- name: Read backup file for route table {{ route_table_id }}
+  slurp:
+    src: "{{ backup_file }}"
+  register: backup_content
+  delegate_to: localhost
+
+- name: Parse original route from backup
+  set_fact:
+    original_route: "{{ backup_content.content | b64decode | from_json | first }}"
+
+- name: Display original route being restored
+  debug:
+    msg:
+      - "Restoring route table {{ route_table_id }} ({{ route_table_name }})"
+      - "Original route: {{ original_route }}"
+
+- name: Delete current default route (to BGP router)
+  shell: |
+    aws ec2 delete-route \
+      --region {{ aws_region }} \
+      --route-table-id {{ route_table_id }} \
+      --destination-cidr-block 0.0.0.0/0
+  register: delete_current
+  changed_when: delete_current.rc == 0
+  failed_when: false
+  delegate_to: localhost
+
+- name: Restore original default route (NAT Gateway)
+  shell: |
+    {% if original_route.NatGatewayId is defined %}
+    aws ec2 create-route \
+      --region {{ aws_region }} \
+      --route-table-id {{ route_table_id }} \
+      --destination-cidr-block 0.0.0.0/0 \
+      --nat-gateway-id {{ original_route.NatGatewayId }}
+    {% elif original_route.GatewayId is defined %}
+    aws ec2 create-route \
+      --region {{ aws_region }} \
+      --route-table-id {{ route_table_id }} \
+      --destination-cidr-block 0.0.0.0/0 \
+      --gateway-id {{ original_route.GatewayId }}
+    {% elif original_route.InstanceId is defined %}
+    aws ec2 create-route \
+      --region {{ aws_region }} \
+      --route-table-id {{ route_table_id }} \
+      --destination-cidr-block 0.0.0.0/0 \
+      --instance-id {{ original_route.InstanceId }}
+    {% else %}
+    echo "ERROR: Unknown route target type in backup"
+    exit 1
+    {% endif %}
+  register: restore_result
+  changed_when: restore_result.rc == 0
+  retries: 3
+  delay: 5
+  until: restore_result.rc == 0
+  delegate_to: localhost
+
+- name: Verify route restored successfully
+  shell: |
+    aws ec2 describe-route-tables \
+      --region {{ aws_region }} \
+      --route-table-ids {{ route_table_id }} \
+      --query 'RouteTables[0].Routes[?DestinationCidrBlock==`0.0.0.0/0`]' \
+      --output json
+  register: restored_route
+  changed_when: false
+  delegate_to: localhost
+
+- name: Display restored route
+  debug:
+    msg:
+      - "Route Table {{ route_table_id }} Restored:"
+      - "  {{ restored_route.stdout | from_json }}"
+      - "  Status: ROLLBACK COMPLETE"

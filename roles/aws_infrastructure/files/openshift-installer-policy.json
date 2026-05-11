@@ -25,7 +25,10 @@
         "iam:TagRole",
         "iam:TagInstanceProfile",
         "route53:*",
-        "s3:*"
+        "s3:*",
+        "tag:GetResources",
+        "tag:TagResources",
+        "tag:UntagResources"
       ],
       "Resource": "*"
     }

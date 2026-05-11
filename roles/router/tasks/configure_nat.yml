@@ -1,0 +1,426 @@
+---
+# Configure NAT and routing on BGP router instances
+# This task configures routers to act as NAT gateways for worker nodes
+
+- name: Get all hub router private IPs
+  shell: |
+    aws ec2 describe-instances \
+      --region {{ aws_region }} \
+      --instance-ids {{ router_hub_instance.stdout }} \
+      --query 'Reservations[0].Instances[0].NetworkInterfaces[*].PrivateIpAddress' \
+      --output text | tr '\t' ' '
+  register: hub_router_ips_raw
+  changed_when: false
+
+- name: Get bastion public IP
+  shell: |
+    aws ec2 describe-instances \
+      --region {{ aws_region }} \
+      --filters "Name=tag:Name,Values=bastion-vpc-bastion" "Name=instance-state-name,Values=running" \
+      --query 'Reservations[0].Instances[0].PublicIpAddress' \
+      --output text
+  register: bastion_public_ip
+  changed_when: false
+
+- name: Detect reachable hub router IP from bastion
+  shell: |
+    BASTION_IP="{{ bastion_public_ip.stdout }}"
+    for IP in {{ hub_router_ips_raw.stdout }}; do
+      echo "Testing connectivity to $IP..." >&2
+      if ssh -i ~/.ssh/{{ bastion_key_name }} \
+        -o ConnectTimeout=5 \
+        -o ServerAliveInterval=2 \
+        -o ServerAliveCountMax=1 \
+        -o StrictHostKeyChecking=no \
+        {{ bastion_user }}@$BASTION_IP \
+        "ping -c 1 -W 2 $IP >/dev/null 2>&1" &>/dev/null; then
+        echo "Found reachable IP: $IP" >&2
+        echo $IP
+        exit 0
+      fi
+    done
+    echo "ERROR: No reachable IP found for hub router" >&2
+    exit 1
+  register: hub_router_reachable_ip
+  changed_when: false
+
+- name: Get hub router ENI details for policy routing
+  shell: |
+    aws ec2 describe-instances \
+      --region {{ aws_region }} \
+      --instance-ids {{ router_hub_instance.stdout }} \
+      --query 'Reservations[0].Instances[0].NetworkInterfaces[*].{Index:Attachment.DeviceIndex,IP:PrivateIpAddress,Subnet:SubnetId}' \
+      --output json
+  register: hub_router_enis
+  changed_when: false
+
+- name: Get subnet gateway IPs for hub router
+  shell: |
+    {% raw %}
+    echo '{{ hub_router_enis.stdout }}' | jq -r '.[] | .Subnet' | while read SUBNET_ID; do
+      CIDR=$(aws ec2 describe-subnets --region {{ aws_region }} --subnet-ids $SUBNET_ID --query 'Subnets[0].CidrBlock' --output text)
+      # Gateway is typically .1 in the subnet
+      GATEWAY=$(echo $CIDR | awk -F/ '{print $1}' | awk -F. '{print $1"."$2"."$3".1"}')
+      echo "$SUBNET_ID:$CIDR:$GATEWAY"
+    done
+    {% endraw %}
+  register: hub_subnet_gateways
+  changed_when: false
+
+- name: Configure hub router NAT and routing
+  shell: |
+    ssh -i ~/.ssh/{{ bastion_key_name }} {{ bastion_user }}@{{ bastion_public_ip.stdout }} \
+      "ssh -i ~/.ssh/openshift-key -o StrictHostKeyChecking=no {{ router_user }}@{{ hub_router_reachable_ip.stdout }}" << 'EOF'
+    # Install iptables-services if not already installed
+    if ! rpm -q iptables-services &>/dev/null; then
+      sudo dnf install -y iptables-services
+    fi
+
+    # Enable IP forwarding
+    sudo sysctl -w net.ipv4.ip_forward=1
+    echo "net.ipv4.ip_forward = 1" | sudo tee -a /etc/sysctl.conf
+
+    # Add iptables MASQUERADE rule for outgoing traffic via ens6 (public subnet)
+    sudo iptables -t nat -C POSTROUTING -o ens6 -j MASQUERADE 2>/dev/null || \
+      sudo iptables -t nat -A POSTROUTING -o ens6 -j MASQUERADE
+
+    # Save iptables rules
+    sudo service iptables save
+
+    # Enable iptables service to load rules at boot
+    sudo systemctl enable iptables
+
+    # Configure policy-based routing for multi-ENI setup
+    # This ensures traffic arriving on ens5 returns via ens5, and ens6 via ens6
+
+    # Get interface IPs and gateways
+    ENS5_IP=$(ip addr show ens5 | grep 'inet ' | awk '{print $2}' | cut -d/ -f1)
+    ENS6_IP=$(ip addr show ens6 | grep 'inet ' | awk '{print $2}' | cut -d/ -f1)
+    ENS5_SUBNET=$(ip addr show ens5 | grep 'inet ' | awk '{print $2}' | cut -d/ -f2)
+    ENS6_SUBNET=$(ip addr show ens6 | grep 'inet ' | awk '{print $2}' | cut -d/ -f2)
+    ENS5_GW=$(echo $ENS5_IP | awk -F. '{print $1"."$2"."$3".1"}')
+    ENS6_GW=$(echo $ENS6_IP | awk -F. '{print $1"."$2"."$3".1"}')
+
+    echo "ENS5: $ENS5_IP/$ENS5_SUBNET, Gateway: $ENS5_GW"
+    echo "ENS6: $ENS6_IP/$ENS6_SUBNET, Gateway: $ENS6_GW (NAT GW: {{ hub_nat_gateway_ip }})"
+
+    # Add routing tables to /etc/iproute2/rt_tables if not already present
+    grep -q "^100 ens5_table" /etc/iproute2/rt_tables || echo "100 ens5_table" | sudo tee -a /etc/iproute2/rt_tables
+    grep -q "^200 ens6_table" /etc/iproute2/rt_tables || echo "200 ens6_table" | sudo tee -a /etc/iproute2/rt_tables
+
+    # Create systemd service for policy routing
+    cat << 'SERVICE' | sudo tee /etc/systemd/system/bgp-router-routes.service
+    [Unit]
+    Description=Configure BGP router policy-based routing
+    After=network-online.target
+    Wants=network-online.target
+
+    [Service]
+    Type=oneshot
+    ExecStart=/bin/bash -c '\
+      set -x; \
+      # Wait for network to be ready
+      sleep 5; \
+      \
+      # Get interface details
+      ENS5_IP=$(ip addr show ens5 | grep "inet " | awk "{print \$2}" | cut -d/ -f1); \
+      ENS6_IP=$(ip addr show ens6 | grep "inet " | awk "{print \$2}" | cut -d/ -f1); \
+      ENS5_GW=$(echo $ENS5_IP | awk -F. "{print \$1\".\"\$2\".\"\$3\".1\"}"); \
+      ENS6_GW=$(echo $ENS6_IP | awk -F. "{print \$1\".\"\$2\".\"\$3\".1\"}"); \
+      \
+      # Clean up old routes and rules (idempotent)
+      ip route del default via $ENS5_GW dev ens5 2>/dev/null || true; \
+      ip route del default via $ENS6_GW dev ens6 proto dhcp 2>/dev/null || true; \
+      ip rule del from $ENS5_IP table ens5_table 2>/dev/null || true; \
+      ip rule del from $ENS6_IP table ens6_table 2>/dev/null || true; \
+      ip route flush table ens5_table 2>/dev/null || true; \
+      ip route flush table ens6_table 2>/dev/null || true; \
+      \
+      # Set up routing table for ens5 (worker subnet)
+      ip route add default via $ENS5_GW dev ens5 table ens5_table; \
+      ip rule add from $ENS5_IP table ens5_table priority 100; \
+      \
+      # Set up routing table for ens6 (public subnet with NAT gateway)
+      ip route add default via {{ hub_nat_gateway_ip }} dev ens6 table ens6_table; \
+      ip rule add from $ENS6_IP table ens6_table priority 200; \
+      \
+      # Main routing table: prefer NAT gateway for internet
+      ip route add default via {{ hub_nat_gateway_ip }} dev ens6 || \
+        ip route replace default via {{ hub_nat_gateway_ip }} dev ens6; \
+      \
+      # Verify configuration
+      echo "=== Policy Routing Configuration ==="; \
+      ip rule show; \
+      echo ""; \
+      echo "=== Main Routing Table ==="; \
+      ip route show; \
+      echo ""; \
+      echo "=== ENS5 Routing Table ==="; \
+      ip route show table ens5_table; \
+      echo ""; \
+      echo "=== ENS6 Routing Table ==="; \
+      ip route show table ens6_table'
+    RemainAfterExit=yes
+
+    [Install]
+    WantedBy=multi-user.target
+    SERVICE
+
+    sudo systemctl daemon-reload
+    sudo systemctl enable bgp-router-routes.service
+
+    # Apply routing configuration now
+    echo "Applying policy-based routing configuration..."
+
+    # Clean up old routes and rules
+    sudo ip route del default via $ENS5_GW dev ens5 2>/dev/null || true
+    sudo ip route del default via $ENS6_GW dev ens6 proto dhcp 2>/dev/null || true
+    sudo ip rule del from $ENS5_IP table ens5_table 2>/dev/null || true
+    sudo ip rule del from $ENS6_IP table ens6_table 2>/dev/null || true
+    sudo ip route flush table ens5_table 2>/dev/null || true
+    sudo ip route flush table ens6_table 2>/dev/null || true
+
+    # Set up routing table for ens5 (worker subnet)
+    sudo ip route add default via $ENS5_GW dev ens5 table ens5_table
+    sudo ip rule add from $ENS5_IP table ens5_table priority 100
+
+    # Set up routing table for ens6 (public subnet with NAT gateway)
+    sudo ip route add default via {{ hub_nat_gateway_ip }} dev ens6 table ens6_table
+    sudo ip rule add from $ENS6_IP table ens6_table priority 200
+
+    # Main routing table: prefer NAT gateway for internet
+    sudo ip route add default via {{ hub_nat_gateway_ip }} dev ens6 2>/dev/null || \
+      sudo ip route replace default via {{ hub_nat_gateway_ip }} dev ens6
+
+    echo "=== Configuration Complete ==="
+    echo "IP Forwarding:"
+    sysctl net.ipv4.ip_forward
+    echo ""
+    echo "NAT Rules:"
+    sudo iptables -t nat -L POSTROUTING -n -v | grep MASQUERADE
+    echo ""
+    echo "=== Main Routing Table ==="
+    ip route show
+    echo ""
+    echo "=== Policy Routing Rules ==="
+    ip rule show
+    echo ""
+    echo "=== ENS5 Routing Table (Worker Subnet) ==="
+    ip route show table ens5_table
+    echo ""
+    echo "=== ENS6 Routing Table (Public Subnet) ==="
+    ip route show table ens6_table
+    echo ""
+    echo "Testing Internet Connectivity:"
+    ping -c 3 8.8.8.8 && echo "SUCCESS" || echo "FAILED"
+    EOF
+  register: hub_nat_config
+  changed_when: false
+
+- name: Display hub router NAT configuration
+  debug:
+    var: hub_nat_config.stdout_lines
+
+- name: Get all managed router private IPs
+  shell: |
+    aws ec2 describe-instances \
+      --region {{ aws_region }} \
+      --instance-ids {{ router_managed_instance.stdout }} \
+      --query 'Reservations[0].Instances[0].NetworkInterfaces[*].PrivateIpAddress' \
+      --output text | tr '\t' ' '
+  register: managed_router_ips_raw
+  changed_when: false
+
+- name: Detect reachable managed router IP from bastion
+  shell: |
+    BASTION_IP="{{ bastion_public_ip.stdout }}"
+    for IP in {{ managed_router_ips_raw.stdout }}; do
+      echo "Testing connectivity to $IP..." >&2
+      if ssh -i ~/.ssh/{{ bastion_key_name }} \
+        -o ConnectTimeout=5 \
+        -o ServerAliveInterval=2 \
+        -o ServerAliveCountMax=1 \
+        -o StrictHostKeyChecking=no \
+        {{ bastion_user }}@$BASTION_IP \
+        "ping -c 1 -W 2 $IP >/dev/null 2>&1" &>/dev/null; then
+        echo "Found reachable IP: $IP" >&2
+        echo $IP
+        exit 0
+      fi
+    done
+    echo "ERROR: No reachable IP found for managed router" >&2
+    exit 1
+  register: managed_router_reachable_ip
+  changed_when: false
+
+- name: Configure managed router NAT and routing
+  shell: |
+    ssh -i ~/.ssh/{{ bastion_key_name }} {{ bastion_user }}@{{ bastion_public_ip.stdout }} \
+      "ssh -i ~/.ssh/openshift-key -o StrictHostKeyChecking=no {{ router_user }}@{{ managed_router_reachable_ip.stdout }}" << 'EOF'
+    # Install iptables-services if not already installed
+    if ! rpm -q iptables-services &>/dev/null; then
+      sudo dnf install -y iptables-services
+    fi
+
+    # Enable IP forwarding
+    sudo sysctl -w net.ipv4.ip_forward=1
+    echo "net.ipv4.ip_forward = 1" | sudo tee -a /etc/sysctl.conf
+
+    # Add iptables MASQUERADE rule for outgoing traffic via ens6 (public subnet)
+    sudo iptables -t nat -C POSTROUTING -o ens6 -j MASQUERADE 2>/dev/null || \
+      sudo iptables -t nat -A POSTROUTING -o ens6 -j MASQUERADE
+
+    # Save iptables rules
+    sudo service iptables save
+
+    # Enable iptables service to load rules at boot
+    sudo systemctl enable iptables
+
+    # Configure policy-based routing for multi-ENI setup
+    # This ensures traffic arriving on ens5 returns via ens5, and ens6 via ens6
+
+    # Get interface IPs and gateways
+    ENS5_IP=$(ip addr show ens5 | grep 'inet ' | awk '{print $2}' | cut -d/ -f1)
+    ENS6_IP=$(ip addr show ens6 | grep 'inet ' | awk '{print $2}' | cut -d/ -f1)
+    ENS5_SUBNET=$(ip addr show ens5 | grep 'inet ' | awk '{print $2}' | cut -d/ -f2)
+    ENS6_SUBNET=$(ip addr show ens6 | grep 'inet ' | awk '{print $2}' | cut -d/ -f2)
+    ENS5_GW=$(echo $ENS5_IP | awk -F. '{print $1"."$2"."$3".1"}')
+    ENS6_GW=$(echo $ENS6_IP | awk -F. '{print $1"."$2"."$3".1"}')
+
+    echo "ENS5: $ENS5_IP/$ENS5_SUBNET, Gateway: $ENS5_GW"
+    echo "ENS6: $ENS6_IP/$ENS6_SUBNET, Gateway: $ENS6_GW (NAT GW: {{ managed_nat_gateway_ip }})"
+
+    # Add routing tables to /etc/iproute2/rt_tables if not already present
+    grep -q "^100 ens5_table" /etc/iproute2/rt_tables || echo "100 ens5_table" | sudo tee -a /etc/iproute2/rt_tables
+    grep -q "^200 ens6_table" /etc/iproute2/rt_tables || echo "200 ens6_table" | sudo tee -a /etc/iproute2/rt_tables
+
+    # Create systemd service for policy routing
+    cat << 'SERVICE' | sudo tee /etc/systemd/system/bgp-router-routes.service
+    [Unit]
+    Description=Configure BGP router policy-based routing
+    After=network-online.target
+    Wants=network-online.target
+
+    [Service]
+    Type=oneshot
+    ExecStart=/bin/bash -c '\
+      set -x; \
+      # Wait for network to be ready
+      sleep 5; \
+      \
+      # Get interface details
+      ENS5_IP=$(ip addr show ens5 | grep "inet " | awk "{print \$2}" | cut -d/ -f1); \
+      ENS6_IP=$(ip addr show ens6 | grep "inet " | awk "{print \$2}" | cut -d/ -f1); \
+      ENS5_GW=$(echo $ENS5_IP | awk -F. "{print \$1\".\"\$2\".\"\$3\".1\"}"); \
+      ENS6_GW=$(echo $ENS6_IP | awk -F. "{print \$1\".\"\$2\".\"\$3\".1\"}"); \
+      \
+      # Clean up old routes and rules (idempotent)
+      ip route del default via $ENS5_GW dev ens5 2>/dev/null || true; \
+      ip route del default via $ENS6_GW dev ens6 proto dhcp 2>/dev/null || true; \
+      ip rule del from $ENS5_IP table ens5_table 2>/dev/null || true; \
+      ip rule del from $ENS6_IP table ens6_table 2>/dev/null || true; \
+      ip route flush table ens5_table 2>/dev/null || true; \
+      ip route flush table ens6_table 2>/dev/null || true; \
+      \
+      # Set up routing table for ens5 (worker subnet)
+      ip route add default via $ENS5_GW dev ens5 table ens5_table; \
+      ip rule add from $ENS5_IP table ens5_table priority 100; \
+      \
+      # Set up routing table for ens6 (public subnet with NAT gateway)
+      ip route add default via {{ managed_nat_gateway_ip }} dev ens6 table ens6_table; \
+      ip rule add from $ENS6_IP table ens6_table priority 200; \
+      \
+      # Main routing table: prefer NAT gateway for internet
+      ip route add default via {{ managed_nat_gateway_ip }} dev ens6 || \
+        ip route replace default via {{ managed_nat_gateway_ip }} dev ens6; \
+      \
+      # Verify configuration
+      echo "=== Policy Routing Configuration ==="; \
+      ip rule show; \
+      echo ""; \
+      echo "=== Main Routing Table ==="; \
+      ip route show; \
+      echo ""; \
+      echo "=== ENS5 Routing Table ==="; \
+      ip route show table ens5_table; \
+      echo ""; \
+      echo "=== ENS6 Routing Table ==="; \
+      ip route show table ens6_table'
+    RemainAfterExit=yes
+
+    [Install]
+    WantedBy=multi-user.target
+    SERVICE
+
+    sudo systemctl daemon-reload
+    sudo systemctl enable bgp-router-routes.service
+
+    # Apply routing configuration now
+    echo "Applying policy-based routing configuration..."
+
+    # Clean up old routes and rules
+    sudo ip route del default via $ENS5_GW dev ens5 2>/dev/null || true
+    sudo ip route del default via $ENS6_GW dev ens6 proto dhcp 2>/dev/null || true
+    sudo ip rule del from $ENS5_IP table ens5_table 2>/dev/null || true
+    sudo ip rule del from $ENS6_IP table ens6_table 2>/dev/null || true
+    sudo ip route flush table ens5_table 2>/dev/null || true
+    sudo ip route flush table ens6_table 2>/dev/null || true
+
+    # Set up routing table for ens5 (worker subnet)
+    sudo ip route add default via $ENS5_GW dev ens5 table ens5_table
+    sudo ip rule add from $ENS5_IP table ens5_table priority 100
+
+    # Set up routing table for ens6 (public subnet with NAT gateway)
+    sudo ip route add default via {{ managed_nat_gateway_ip }} dev ens6 table ens6_table
+    sudo ip rule add from $ENS6_IP table ens6_table priority 200
+
+    # Main routing table: prefer NAT gateway for internet
+    sudo ip route add default via {{ managed_nat_gateway_ip }} dev ens6 2>/dev/null || \
+      sudo ip route replace default via {{ managed_nat_gateway_ip }} dev ens6
+
+    echo "=== Configuration Complete ==="
+    echo "IP Forwarding:"
+    sysctl net.ipv4.ip_forward
+    echo ""
+    echo "NAT Rules:"
+    sudo iptables -t nat -L POSTROUTING -n -v | grep MASQUERADE
+    echo ""
+    echo "=== Main Routing Table ==="
+    ip route show
+    echo ""
+    echo "=== Policy Routing Rules ==="
+    ip rule show
+    echo ""
+    echo "=== ENS5 Routing Table (Worker Subnet) ==="
+    ip route show table ens5_table
+    echo ""
+    echo "=== ENS6 Routing Table (Public Subnet) ==="
+    ip route show table ens6_table
+    echo ""
+    echo "Testing Internet Connectivity:"
+    ping -c 3 8.8.8.8 && echo "SUCCESS" || echo "FAILED"
+    EOF
+  register: managed_nat_config
+  changed_when: false
+
+- name: Display managed router NAT configuration
+  debug:
+    var: managed_nat_config.stdout_lines
+
+- name: NAT configuration summary
+  debug:
+    msg:
+      - "=========================================="
+      - "Router NAT Configuration Complete"
+      - "=========================================="
+      - "Hub Router:"
+      - "  NAT Gateway IP: {{ hub_nat_gateway_ip }}"
+      - "  Default Route: via {{ hub_nat_gateway_ip }} dev ens6"
+      - "  NAT Rule: MASQUERADE on ens6"
+      - ""
+      - "Managed Router:"
+      - "  NAT Gateway IP: {{ managed_nat_gateway_ip }}"
+      - "  Default Route: via {{ managed_nat_gateway_ip }} dev ens6"
+      - "  NAT Rule: MASQUERADE on ens6"
+      - ""
+      - "Both routers configured for internet access via NAT gateway"

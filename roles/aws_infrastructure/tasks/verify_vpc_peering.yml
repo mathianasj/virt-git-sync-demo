@@ -1,0 +1,175 @@
+---
+# Verify VPC peering connectivity for bastion → router SSH access
+# This task file validates that VPC peering is properly configured
+
+- name: Get VPC peering connection status
+  shell: |
+    aws ec2 describe-vpc-peering-connections \
+      --region {{ aws_region }} \
+      --filters "Name=status-code,Values=active" \
+      --query 'VpcPeeringConnections[*].[VpcPeeringConnectionId,RequesterVpcInfo.CidrBlock,AccepterVpcInfo.CidrBlock,Status.Code]' \
+      --output table
+  register: vpc_peering_status
+  changed_when: false
+  delegate_to: localhost
+  connection: local
+
+- name: Display VPC peering status
+  debug:
+    msg: "{{ vpc_peering_status.stdout_lines }}"
+
+- name: Check bastion → hub VPC peering routes
+  shell: |
+    aws ec2 describe-route-tables \
+      --region {{ aws_region }} \
+      --filters "Name=vpc-id,Values={{ bastion_vpc_id }}" \
+      --query 'RouteTables[*].Routes[?DestinationCidrBlock==`{{ vpcs[0].cidr }}`].[DestinationCidrBlock,VpcPeeringConnectionId,State]' \
+      --output table
+  register: bastion_hub_routes
+  changed_when: false
+  delegate_to: localhost
+  connection: local
+
+- name: Display bastion → hub routes
+  debug:
+    msg: "{{ bastion_hub_routes.stdout_lines }}"
+
+- name: Check bastion → managed VPC peering routes
+  shell: |
+    aws ec2 describe-route-tables \
+      --region {{ aws_region }} \
+      --filters "Name=vpc-id,Values={{ bastion_vpc_id }}" \
+      --query 'RouteTables[*].Routes[?DestinationCidrBlock==`{{ vpcs[1].cidr }}`].[DestinationCidrBlock,VpcPeeringConnectionId,State]' \
+      --output table
+  register: bastion_managed_routes
+  changed_when: false
+  delegate_to: localhost
+  connection: local
+
+- name: Display bastion → managed routes
+  debug:
+    msg: "{{ bastion_managed_routes.stdout_lines }}"
+
+- name: Get hub router private IP
+  shell: |
+    aws ec2 describe-instances \
+      --region {{ aws_region }} \
+      --filters "Name=tag:Name,Values=frr-router-hub" "Name=instance-state-name,Values=running" \
+      --query 'Reservations[0].Instances[0].PrivateIpAddress' \
+      --output text
+  register: hub_router_ip
+  changed_when: false
+  delegate_to: localhost
+  connection: local
+
+- name: Get managed router private IP
+  shell: |
+    aws ec2 describe-instances \
+      --region {{ aws_region }} \
+      --filters "Name=tag:Name,Values=frr-router-managed" "Name=instance-state-name,Values=running" \
+      --query 'Reservations[0].Instances[0].PrivateIpAddress' \
+      --output text
+  register: managed_router_ip
+  changed_when: false
+  delegate_to: localhost
+  connection: local
+
+- name: Test ICMP connectivity to hub router
+  shell: |
+    ping -c 3 -W 2 {{ hub_router_ip.stdout }}
+  register: hub_ping_result
+  changed_when: false
+  failed_when: false
+
+- name: Display hub router ping results
+  debug:
+    msg:
+      - "Hub router IP: {{ hub_router_ip.stdout }}"
+      - "Ping result: {{ 'SUCCESS' if hub_ping_result.rc == 0 else 'FAILED' }}"
+      - "{{ hub_ping_result.stdout_lines }}"
+
+- name: Test ICMP connectivity to managed router
+  shell: |
+    ping -c 3 -W 2 {{ managed_router_ip.stdout }}
+  register: managed_ping_result
+  changed_when: false
+  failed_when: false
+
+- name: Display managed router ping results
+  debug:
+    msg:
+      - "Managed router IP: {{ managed_router_ip.stdout }}"
+      - "Ping result: {{ 'SUCCESS' if managed_ping_result.rc == 0 else 'FAILED' }}"
+      - "{{ managed_ping_result.stdout_lines }}"
+
+- name: Check router security groups allow SSH from bastion VPC
+  shell: |
+    aws ec2 describe-security-groups \
+      --region {{ aws_region }} \
+      --filters "Name=tag:Router,Values=frr" \
+      --query 'SecurityGroups[*].IpPermissions[?FromPort==`22` || ToPort==`22` || IpProtocol==`-1`]' \
+      --output json
+  register: router_ssh_rules
+  changed_when: false
+  delegate_to: localhost
+  connection: local
+
+- name: Display router SSH security group rules
+  debug:
+    var: router_ssh_rules.stdout | from_json
+
+- name: Test SSH connectivity to hub router
+  shell: |
+    ssh -i ~/.ssh/{{ bastion_key_name }} \
+        -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null \
+        -o ConnectTimeout=5 \
+        {{ bastion_user }}@{{ hub_router_ip.stdout }} "hostname"
+  register: hub_ssh_test
+  changed_when: false
+  failed_when: false
+
+- name: Display hub router SSH test result
+  debug:
+    msg:
+      - "Hub router SSH test: {{ 'SUCCESS' if hub_ssh_test.rc == 0 else 'FAILED' }}"
+      - "Hostname: {{ hub_ssh_test.stdout if hub_ssh_test.rc == 0 else 'N/A' }}"
+
+- name: Test SSH connectivity to managed router
+  shell: |
+    ssh -i ~/.ssh/{{ bastion_key_name }} \
+        -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null \
+        -o ConnectTimeout=5 \
+        {{ bastion_user }}@{{ managed_router_ip.stdout }} "hostname"
+  register: managed_ssh_test
+  changed_when: false
+  failed_when: false
+
+- name: Display managed router SSH test result
+  debug:
+    msg:
+      - "Managed router SSH test: {{ 'SUCCESS' if managed_ssh_test.rc == 0 else 'FAILED' }}"
+      - "Hostname: {{ managed_ssh_test.stdout if managed_ssh_test.rc == 0 else 'N/A' }}"
+
+- name: VPC peering verification summary
+  debug:
+    msg:
+      - "=========================================="
+      - "VPC Peering Verification Summary"
+      - "=========================================="
+      - "VPC Peering Status: Active"
+      - "Bastion → Hub Routes: {{ 'OK' if bastion_hub_routes.rc == 0 else 'FAILED' }}"
+      - "Bastion → Managed Routes: {{ 'OK' if bastion_managed_routes.rc == 0 else 'FAILED' }}"
+      - "Hub Router Ping: {{ 'SUCCESS' if hub_ping_result.rc == 0 else 'FAILED' }}"
+      - "Managed Router Ping: {{ 'SUCCESS' if managed_ping_result.rc == 0 else 'FAILED' }}"
+      - "Hub Router SSH: {{ 'SUCCESS' if hub_ssh_test.rc == 0 else 'FAILED' }}"
+      - "Managed Router SSH: {{ 'SUCCESS' if managed_ssh_test.rc == 0 else 'FAILED' }}"
+      - "=========================================="
+
+- name: Fail if connectivity tests failed
+  fail:
+    msg: "VPC peering connectivity verification failed. Check routes and security groups."
+  when:
+    - hub_ping_result.rc != 0 or managed_ping_result.rc != 0 or
+      hub_ssh_test.rc != 0 or managed_ssh_test.rc != 0

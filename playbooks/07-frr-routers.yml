@@ -1,0 +1,62 @@
+---
+- name: Phase 7 - FRRouting Router Deployment
+  hosts: localhost
+  gather_facts: no
+  become: no
+  vars_files:
+    - /tmp/selected-domain.yml
+  tasks:
+    - name: Load global variables
+      include_vars:
+        file: "{{ playbook_dir }}/../group_vars/all.yml"
+
+    - name: Display phase timing information
+      debug:
+        msg:
+          - "=========================================="
+          - "Phase 7: FRRouting Router Deployment"
+          - "=========================================="
+          - "Expected Runtime: 5-10 minutes"
+          - "Started: {{ ansible_date_time.time }}"
+          - "Estimated Completion: {{ '%02d:%02d' | format((ansible_date_time.hour | int + ((ansible_date_time.minute | int + 10) // 60)) % 24, (ansible_date_time.minute | int + 10) % 60) }}"
+          - "=========================================="
+
+    - name: Display router deployment overview
+      debug:
+        msg:
+          - "=========================================="
+          - "Router Deployment (FRRouting)"
+          - "=========================================="
+          - "Deploying routers as EC2 instances"
+          - "OS: Amazon Linux 2 + FRRouting"
+          - "Availability Zone: {{ router_availability_zone }}"
+          - "Instance Type: {{ router_instance_type }}"
+          - "Clusters: hub and managed (2 routers total)"
+          - "=========================================="
+
+    - name: Deploy routers
+      include_role:
+        name: router
+
+    - name: Display deployment summary
+      debug:
+        msg:
+          - "=========================================="
+          - "FRRouting Routers Deployed Successfully"
+          - "=========================================="
+          - "Two routers deployed in {{ router_availability_zone }}"
+          - "Same availability zone as bare metal nodes"
+          - ""
+          - "Connect via SSH:"
+          - "  ssh -i ~/.ssh/{{ router_key_name }} {{ router_user }}@<public-ip>"
+          - ""
+          - "FRRouting Management:"
+          - "  Access CLI: sudo vtysh"
+          - "  Show routes: show ip route"
+          - "  Show BGP: show ip bgp summary"
+          - ""
+          - "Next steps:"
+          - "  1. Configure routing with vtysh"
+          - "  2. Set up BGP or OSPF"
+          - "  3. Configure static routes if needed"
+          - "=========================================="

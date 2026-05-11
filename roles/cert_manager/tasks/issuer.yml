@@ -1,0 +1,28 @@
+---
+- name: Query Route53 for hosted zone ID
+  shell: |
+    aws route53 list-hosted-zones --query "HostedZones[?Name=='{{ cluster_config.base_domain }}.'].Id" --output text | sed 's/\/hostedzone\///'
+  register: route53_zone_query
+  changed_when: false
+  delegate_to: localhost
+  become: no
+
+- name: Set Route53 hosted zone ID
+  set_fact:
+    route53_hosted_zone_id: "{{ route53_zone_query.stdout }}"
+
+- name: Create Let's Encrypt ClusterIssuer
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: present
+    definition: "{{ lookup('template', 'cluster-issuer.yml.j2') | from_yaml }}"
+
+- name: Wait for ClusterIssuer to be ready
+  shell: |
+    oc get clusterissuer letsencrypt-prod -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}'
+  environment: "{{ kubeconfig_env }}"
+  register: issuer_status
+  until: issuer_status.stdout == "True"
+  retries: 10
+  delay: 30
+  changed_when: false

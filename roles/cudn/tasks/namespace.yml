@@ -1,0 +1,107 @@
+---
+- name: Create namespace for CUDN policies on hub
+  kubernetes.core.k8s:
+    kubeconfig: "{{ hub_kubeconfig }}"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ cudn_policy_namespace }}"
+
+- name: Build namespace labels dictionary
+  set_fact:
+    cudn_namespace_labels: "{{ {cudn_namespace_label_key: cudn_namespace_label_value, cudn_primary_label_key: cudn_primary_label_value} }}"
+  when: cudn_namespace_labels is not defined
+
+- name: Create namespace policy for cudn-vms (both clusters)
+  kubernetes.core.k8s:
+    kubeconfig: "{{ hub_kubeconfig }}"
+    state: present
+    definition:
+      apiVersion: policy.open-cluster-management.io/v1
+      kind: Policy
+      metadata:
+        name: policy-cudn-namespace
+        namespace: "{{ cudn_policy_namespace }}"
+        annotations:
+          policy.open-cluster-management.io/standards: NIST-CSF
+          policy.open-cluster-management.io/categories: CM Configuration Management
+          policy.open-cluster-management.io/controls: CM-2 Baseline Configuration
+      spec:
+        remediationAction: enforce
+        disabled: false
+        policy-templates:
+          - objectDefinition:
+              apiVersion: policy.open-cluster-management.io/v1
+              kind: ConfigurationPolicy
+              metadata:
+                name: policy-cudn-vm-namespace
+              spec:
+                remediationAction: enforce
+                severity: high
+                object-templates:
+                  - complianceType: musthave
+                    recreateOption: IfRequired
+                    objectDefinition:
+                      apiVersion: v1
+                      kind: Namespace
+                      metadata:
+                        name: "{{ cudn_vm_namespace }}"
+                        labels: "{{ cudn_namespace_labels }}"
+
+- name: Create PlacementRule for namespace (all clusters)
+  kubernetes.core.k8s:
+    kubeconfig: "{{ hub_kubeconfig }}"
+    state: present
+    definition:
+      apiVersion: apps.open-cluster-management.io/v1
+      kind: PlacementRule
+      metadata:
+        name: placement-cudn-namespace
+        namespace: "{{ cudn_policy_namespace }}"
+      spec:
+        clusterSelector:
+          matchExpressions:
+            - key: vendor
+              operator: In
+              values:
+                - OpenShift
+
+- name: Create PlacementBinding for namespace
+  kubernetes.core.k8s:
+    kubeconfig: "{{ hub_kubeconfig }}"
+    state: present
+    definition:
+      apiVersion: policy.open-cluster-management.io/v1
+      kind: PlacementBinding
+      metadata:
+        name: binding-cudn-namespace
+        namespace: "{{ cudn_policy_namespace }}"
+      placementRef:
+        name: placement-cudn-namespace
+        kind: PlacementRule
+        apiGroup: apps.open-cluster-management.io
+      subjects:
+        - name: policy-cudn-namespace
+          kind: Policy
+          apiGroup: policy.open-cluster-management.io
+
+- name: Wait for namespace policy compliance on both clusters
+  shell: |
+    oc get policy policy-cudn-namespace -n {{ cudn_policy_namespace }} -o json | \
+    jq -r '.status.status[] | select(.compliant=="Compliant") | .clustername' | wc -l
+  environment:
+    KUBECONFIG: "{{ hub_kubeconfig }}"
+  register: namespace_compliant_clusters
+  until: namespace_compliant_clusters.stdout | int >= 2
+  retries: "{{ operator_timeout_minutes | int }}"
+  delay: 60
+  changed_when: false
+
+- name: Display namespace policy status
+  debug:
+    msg:
+      - "Namespace {{ cudn_vm_namespace }} created on both clusters"
+      - "Label: {{ cudn_namespace_label_key }}={{ cudn_namespace_label_value }}"
+      - "Compliant clusters: {{ namespace_compliant_clusters.stdout }}"

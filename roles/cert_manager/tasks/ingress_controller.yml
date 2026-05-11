@@ -1,0 +1,34 @@
+---
+- name: Patch IngressController to use cert-manager certificate
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: present
+    definition:
+      apiVersion: operator.openshift.io/v1
+      kind: IngressController
+      metadata:
+        name: default
+        namespace: openshift-ingress-operator
+      spec:
+        defaultCertificate:
+          name: wildcard-apps-tls
+
+- name: Wait for IngressController to update
+  shell: |
+    oc get ingresscontroller default -n openshift-ingress-operator -o jsonpath='{.status.conditions[?(@.type=="Available")].status}'
+  environment: "{{ kubeconfig_env }}"
+  register: ingress_status
+  until: ingress_status.stdout == "True"
+  retries: 20
+  delay: 30
+  changed_when: false
+
+- name: Verify router pods have restarted
+  shell: |
+    oc get pods -n openshift-ingress -l ingresscontroller.operator.openshift.io/deployment-ingresscontroller=default --no-headers | wc -l
+  environment: "{{ kubeconfig_env }}"
+  register: router_pods
+  until: router_pods.stdout | int > 0
+  retries: 10
+  delay: 30
+  changed_when: false

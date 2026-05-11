@@ -14,6 +14,23 @@
       metadata:
         name: "{{ gitea_namespace }}"
 
+- name: Create Gitea service account
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: ServiceAccount
+      metadata:
+        name: gitea
+        namespace: "{{ gitea_namespace }}"
+
+- name: Grant anyuid SCC to Gitea service account
+  shell: |
+    oc adm policy add-scc-to-user anyuid -z gitea -n {{ gitea_namespace }}
+  environment: "{{ kubeconfig_env }}"
+  changed_when: true
+
 - name: Add Gitea Helm repository
   shell: |
     helm repo add gitea-charts {{ gitea_chart_repo }}

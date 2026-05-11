@@ -1,0 +1,11 @@
+---
+# NMState Operator Configuration
+nmstate_operator_namespace: openshift-nmstate
+nmstate_operator_channel: stable
+nmstate_operator_name: kubernetes-nmstate-operator
+nmstate_operator_source: redhat-operators
+nmstate_operator_source_namespace: openshift-marketplace
+
+# BGP Router Configuration
+# Note: bgp_router_ip is looked up dynamically from AWS in playbooks
+# as the router gets its IP via DHCP

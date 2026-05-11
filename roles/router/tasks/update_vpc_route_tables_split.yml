@@ -1,0 +1,319 @@
+---
+# Update VPC route tables with split routing:
+# - Worker subnet (same AZ as router): routes through BGP router
+# - Control plane subnets (other AZs): route directly to NAT gateway
+
+- name: Get VPC peering connection IDs
+  block:
+    - name: Get bastion-to-hub peering ID
+      shell: |
+        aws ec2 describe-vpc-peering-connections \
+          --region {{ aws_region }} \
+          --filters "Name=tag:Name,Values=bastion-to-hub-peering" "Name=status-code,Values=active" \
+          --query 'VpcPeeringConnections[0].VpcPeeringConnectionId' \
+          --output text
+      register: bastion_hub_pcx
+      changed_when: false
+
+    - name: Get bastion-to-managed peering ID
+      shell: |
+        aws ec2 describe-vpc-peering-connections \
+          --region {{ aws_region }} \
+          --filters "Name=tag:Name,Values=bastion-to-managed-peering" "Name=status-code,Values=active" \
+          --query 'VpcPeeringConnections[0].VpcPeeringConnectionId' \
+          --output text
+      register: bastion_managed_pcx
+      changed_when: false
+
+    - name: Get hub-to-managed peering ID
+      shell: |
+        aws ec2 describe-vpc-peering-connections \
+          --region {{ aws_region }} \
+          --filters "Name=tag:Name,Values=hub-to-managed-peering" "Name=status-code,Values=active" \
+          --query 'VpcPeeringConnections[0].VpcPeeringConnectionId' \
+          --output text
+      register: hub_managed_pcx
+      changed_when: false
+
+# Hub cluster route table configuration
+- name: Configure hub cluster route tables
+  block:
+    - name: Get hub cluster private subnets
+      shell: |
+        aws ec2 describe-subnets \
+          --region {{ aws_region }} \
+          --filters "Name=vpc-id,Values={{ hub_vpc_id }}" \
+                    "Name=tag:Name,Values=*private*" \
+          --query 'Subnets[*].{SubnetId:SubnetId,AZ:AvailabilityZone,CIDR:CidrBlock}' \
+          --output json
+      register: hub_private_subnets_info
+      changed_when: false
+
+    - name: Set hub subnet facts
+      set_fact:
+        hub_subnets: "{{ hub_private_subnets_info.stdout | from_json }}"
+        hub_worker_subnet: "{{ (hub_private_subnets_info.stdout | from_json) | selectattr('AZ', 'equalto', router_availability_zone) | list | first }}"
+        hub_control_subnets: "{{ (hub_private_subnets_info.stdout | from_json) | rejectattr('AZ', 'equalto', router_availability_zone) | list }}"
+
+    - name: Get hub router primary ENI
+      shell: |
+        aws ec2 describe-instances \
+          --region {{ aws_region }} \
+          --instance-ids {{ router_hub_instance.stdout }} \
+          --query 'Reservations[0].Instances[0].NetworkInterfaces[?Attachment.DeviceIndex==`0`].NetworkInterfaceId' \
+          --output text
+      register: hub_router_eni
+      changed_when: false
+
+    - name: Get hub NAT gateway ID
+      shell: |
+        aws ec2 describe-nat-gateways \
+          --region {{ aws_region }} \
+          --filter "Name=vpc-id,Values={{ hub_vpc_id }}" \
+                   "Name=state,Values=available" \
+          --query 'NatGateways[0].NatGatewayId' \
+          --output text
+      register: hub_nat_gw
+      changed_when: false
+
+    # Get or create worker subnet route table
+    - name: Get existing hub worker subnet route table
+      shell: |
+        aws ec2 describe-route-tables \
+          --region {{ aws_region }} \
+          --filters "Name=vpc-id,Values={{ hub_vpc_id }}" \
+                    "Name=association.subnet-id,Values={{ hub_worker_subnet.SubnetId }}" \
+          --query 'RouteTables[0].RouteTableId' \
+          --output text
+      register: hub_worker_rt
+      changed_when: false
+
+    - name: Update hub worker subnet default route to BGP router
+      shell: |
+        # Try to create the route first
+        aws ec2 create-route \
+          --region {{ aws_region }} \
+          --route-table-id {{ hub_worker_rt.stdout }} \
+          --destination-cidr-block 0.0.0.0/0 \
+          --network-interface-id {{ hub_router_eni.stdout }} 2>&1 || \
+        # If it exists, replace it
+        aws ec2 replace-route \
+          --region {{ aws_region }} \
+          --route-table-id {{ hub_worker_rt.stdout }} \
+          --destination-cidr-block 0.0.0.0/0 \
+          --network-interface-id {{ hub_router_eni.stdout }}
+      register: hub_worker_route
+      changed_when: "'CreateRoute' in hub_worker_route.stdout or 'ReplaceRoute' in hub_worker_route.stdout"
+      failed_when: false
+
+    # Create route tables for control plane subnets
+    - name: Create route table for hub control plane subnet {{ item.AZ }}
+      shell: |
+        aws ec2 create-route-table \
+          --region {{ aws_region }} \
+          --vpc-id {{ hub_vpc_id }} \
+          --tag-specifications 'ResourceType=route-table,Tags=[{Key=Name,Value=hub-cluster-vpc-private-rt-{{ item.AZ }}},{Key=Cluster,Value=hub}]' \
+          --query 'RouteTable.RouteTableId' \
+          --output text
+      register: hub_control_rt
+      loop: "{{ hub_control_subnets }}"
+      when: hub_control_subnets | length > 0
+
+    - name: Add routes to hub control plane route tables
+      shell: |
+        # Default route to NAT Gateway
+        aws ec2 create-route --region {{ aws_region }} \
+          --route-table-id {{ item.stdout }} \
+          --destination-cidr-block 0.0.0.0/0 \
+          --nat-gateway-id {{ hub_nat_gw.stdout }}
+
+        # Route to managed cluster VPC
+        aws ec2 create-route --region {{ aws_region }} \
+          --route-table-id {{ item.stdout }} \
+          --destination-cidr-block 10.1.0.0/16 \
+          --vpc-peering-connection-id {{ hub_managed_pcx.stdout }}
+
+        # Route to bastion VPC
+        aws ec2 create-route --region {{ aws_region }} \
+          --route-table-id {{ item.stdout }} \
+          --destination-cidr-block 10.255.0.0/16 \
+          --vpc-peering-connection-id {{ bastion_hub_pcx.stdout }}
+
+        # Route to CUDN network via BGP router
+        aws ec2 create-route --region {{ aws_region }} \
+          --route-table-id {{ item.stdout }} \
+          --destination-cidr-block 192.168.100.0/24 \
+          --network-interface-id {{ hub_router_eni.stdout }}
+      loop: "{{ hub_control_rt.results }}"
+      when: hub_control_subnets | length > 0 and not item.skipped | default(false)
+
+    - name: Get existing route table associations for hub control plane subnets
+      shell: |
+        aws ec2 describe-route-tables \
+          --region {{ aws_region }} \
+          --filters "Name=association.subnet-id,Values={{ item.SubnetId }}" \
+          --query 'RouteTables[0].Associations[?SubnetId==`{{ item.SubnetId }}`].RouteTableAssociationId' \
+          --output text
+      loop: "{{ hub_control_subnets }}"
+      register: hub_control_assoc
+      changed_when: false
+      when: hub_control_subnets | length > 0
+
+    - name: Associate hub control plane subnets with new route tables
+      shell: |
+        aws ec2 replace-route-table-association \
+          --region {{ aws_region }} \
+          --association-id {{ item.0.stdout }} \
+          --route-table-id {{ item.1.stdout }}
+      loop: "{{ hub_control_assoc.results | zip(hub_control_rt.results) | list }}"
+      when: hub_control_subnets | length > 0 and not item.0.skipped | default(false) and not item.1.skipped | default(false)
+
+# Managed cluster route table configuration
+- name: Configure managed cluster route tables
+  block:
+    - name: Get managed cluster private subnets
+      shell: |
+        aws ec2 describe-subnets \
+          --region {{ aws_region }} \
+          --filters "Name=vpc-id,Values={{ managed_vpc_id }}" \
+                    "Name=tag:Name,Values=*private*" \
+          --query 'Subnets[*].{SubnetId:SubnetId,AZ:AvailabilityZone,CIDR:CidrBlock}' \
+          --output json
+      register: managed_private_subnets_info
+      changed_when: false
+
+    - name: Set managed subnet facts
+      set_fact:
+        managed_subnets: "{{ managed_private_subnets_info.stdout | from_json }}"
+        managed_worker_subnet: "{{ (managed_private_subnets_info.stdout | from_json) | selectattr('AZ', 'equalto', router_availability_zone) | list | first }}"
+        managed_control_subnets: "{{ (managed_private_subnets_info.stdout | from_json) | rejectattr('AZ', 'equalto', router_availability_zone) | list }}"
+
+    - name: Get managed router primary ENI
+      shell: |
+        aws ec2 describe-instances \
+          --region {{ aws_region }} \
+          --instance-ids {{ router_managed_instance.stdout }} \
+          --query 'Reservations[0].Instances[0].NetworkInterfaces[?Attachment.DeviceIndex==`0`].NetworkInterfaceId' \
+          --output text
+      register: managed_router_eni
+      changed_when: false
+
+    - name: Get managed NAT gateway ID
+      shell: |
+        aws ec2 describe-nat-gateways \
+          --region {{ aws_region }} \
+          --filter "Name=vpc-id,Values={{ managed_vpc_id }}" \
+                   "Name=state,Values=available" \
+          --query 'NatGateways[0].NatGatewayId' \
+          --output text
+      register: managed_nat_gw
+      changed_when: false
+
+    # Get or create worker subnet route table
+    - name: Get existing managed worker subnet route table
+      shell: |
+        aws ec2 describe-route-tables \
+          --region {{ aws_region }} \
+          --filters "Name=vpc-id,Values={{ managed_vpc_id }}" \
+                    "Name=association.subnet-id,Values={{ managed_worker_subnet.SubnetId }}" \
+          --query 'RouteTables[0].RouteTableId' \
+          --output text
+      register: managed_worker_rt
+      changed_when: false
+
+    - name: Update managed worker subnet default route to BGP router
+      shell: |
+        # Try to create the route first
+        aws ec2 create-route \
+          --region {{ aws_region }} \
+          --route-table-id {{ managed_worker_rt.stdout }} \
+          --destination-cidr-block 0.0.0.0/0 \
+          --network-interface-id {{ managed_router_eni.stdout }} 2>&1 || \
+        # If it exists, replace it
+        aws ec2 replace-route \
+          --region {{ aws_region }} \
+          --route-table-id {{ managed_worker_rt.stdout }} \
+          --destination-cidr-block 0.0.0.0/0 \
+          --network-interface-id {{ managed_router_eni.stdout }}
+      register: managed_worker_route
+      changed_when: "'CreateRoute' in managed_worker_route.stdout or 'ReplaceRoute' in managed_worker_route.stdout"
+      failed_when: false
+
+    # Create route tables for control plane subnets
+    - name: Create route table for managed control plane subnet {{ item.AZ }}
+      shell: |
+        aws ec2 create-route-table \
+          --region {{ aws_region }} \
+          --vpc-id {{ managed_vpc_id }} \
+          --tag-specifications 'ResourceType=route-table,Tags=[{Key=Name,Value=managed-cluster-vpc-private-rt-{{ item.AZ }}},{Key=Cluster,Value=managed}]' \
+          --query 'RouteTable.RouteTableId' \
+          --output text
+      register: managed_control_rt
+      loop: "{{ managed_control_subnets }}"
+      when: managed_control_subnets | length > 0
+
+    - name: Add routes to managed control plane route tables
+      shell: |
+        # Default route to NAT Gateway
+        aws ec2 create-route --region {{ aws_region }} \
+          --route-table-id {{ item.stdout }} \
+          --destination-cidr-block 0.0.0.0/0 \
+          --nat-gateway-id {{ managed_nat_gw.stdout }}
+
+        # Route to hub cluster VPC
+        aws ec2 create-route --region {{ aws_region }} \
+          --route-table-id {{ item.stdout }} \
+          --destination-cidr-block 10.0.0.0/16 \
+          --vpc-peering-connection-id {{ hub_managed_pcx.stdout }}
+
+        # Route to bastion VPC
+        aws ec2 create-route --region {{ aws_region }} \
+          --route-table-id {{ item.stdout }} \
+          --destination-cidr-block 10.255.0.0/16 \
+          --vpc-peering-connection-id {{ bastion_managed_pcx.stdout }}
+
+        # Route to CUDN network via BGP router
+        aws ec2 create-route --region {{ aws_region }} \
+          --route-table-id {{ item.stdout }} \
+          --destination-cidr-block 192.168.100.0/24 \
+          --network-interface-id {{ managed_router_eni.stdout }}
+      loop: "{{ managed_control_rt.results }}"
+      when: managed_control_subnets | length > 0 and not item.skipped | default(false)
+
+    - name: Get existing route table associations for managed control plane subnets
+      shell: |
+        aws ec2 describe-route-tables \
+          --region {{ aws_region }} \
+          --filters "Name=association.subnet-id,Values={{ item.SubnetId }}" \
+          --query 'RouteTables[0].Associations[?SubnetId==`{{ item.SubnetId }}`].RouteTableAssociationId' \
+          --output text
+      loop: "{{ managed_control_subnets }}"
+      register: managed_control_assoc
+      changed_when: false
+      when: managed_control_subnets | length > 0
+
+    - name: Associate managed control plane subnets with new route tables
+      shell: |
+        aws ec2 replace-route-table-association \
+          --region {{ aws_region }} \
+          --association-id {{ item.0.stdout }} \
+          --route-table-id {{ item.1.stdout }}
+      loop: "{{ managed_control_assoc.results | zip(managed_control_rt.results) | list }}"
+      when: managed_control_subnets | length > 0 and not item.0.skipped | default(false) and not item.1.skipped | default(false)
+
+- name: Route table configuration summary
+  debug:
+    msg:
+      - "=========================================="
+      - "VPC Route Tables Configured (Split Routing)"
+      - "=========================================="
+      - "Hub Cluster:"
+      - "  Worker subnet ({{ router_availability_zone }}): Routes via BGP Router"
+      - "  Control plane subnets: Route via NAT Gateway"
+      - ""
+      - "Managed Cluster:"
+      - "  Worker subnet ({{ router_availability_zone }}): Routes via BGP Router"
+      - "  Control plane subnets: Route via NAT Gateway"
+      - ""
+      - "This ensures control plane nodes have internet connectivity"
+      - "while worker nodes route through BGP for VM traffic"

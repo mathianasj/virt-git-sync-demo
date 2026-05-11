@@ -1,0 +1,57 @@
+---
+- name: Set kubeconfig environment
+  set_fact:
+    kubeconfig_env:
+      KUBECONFIG: "{{ hub_kubeconfig }}"
+
+- name: Display CUDN deployment overview
+  debug:
+    msg:
+      - "=========================================="
+      - "ClusterUserDefinedNetwork Deployment"
+      - "=========================================="
+      - "Creating Layer 2 network for KubeVirt VMs"
+      - "  Network: {{ cudn_network_name }}"
+      - "  CIDR: {{ cudn_cidr }}"
+      - "  Namespace: {{ cudn_vm_namespace }}"
+      - "  Label: {{ cudn_namespace_label_key }}={{ cudn_namespace_label_value }}"
+      - ""
+      - "BGP integration: Routes advertised automatically"
+      - "Target: Both hub and managed clusters"
+      - "=========================================="
+
+- name: Include namespace creation tasks
+  include_tasks: namespace.yml
+
+- name: Include CUDN policy tasks
+  include_tasks: cudn_policy.yml
+
+- name: Include RouteAdvertisement configuration
+  include_tasks: route_advertisement.yml
+
+- name: Display CUDN deployment status
+  debug:
+    msg:
+      - "=========================================="
+      - "CUDN Deployment Complete"
+      - "=========================================="
+      - "ClusterUserDefinedNetwork: {{ cudn_network_name }}"
+      - "Topology: Layer2"
+      - "CIDR: {{ cudn_cidr }}"
+      - "VM Namespace: {{ cudn_vm_namespace }}"
+      - "Namespace attached via label"
+      - ""
+      - "BGP Advertisement:"
+      - "{{ '  - RouteAdvertisement resources created' if routeadv_available | default(false) else '  - Using FRRConfiguration from playbook 14 (RouteAdvertisements CRD not available)' }}"
+      - "  - BGP sessions established with EC2 routers"
+      - "  - Routes advertised automatically on VM creation"
+      - "  - FRR routers configured for {{ cudn_cidr }}"
+      - "  - VPC routing configured"
+      - ""
+      - "Verification:"
+      - "  oc get clusteruserdefinednetwork"
+      - "{{ '  oc get routeadvertisements' if routeadv_available | default(false) else '  oc get frrconfiguration -n openshift-frr-k8s' }}"
+      - "  oc get frrconfiguration -n openshift-frr-k8s"
+      - "  oc get ns {{ cudn_vm_namespace }} --show-labels"
+      - "  oc get nad -n {{ cudn_vm_namespace }}"
+      - "=========================================="
