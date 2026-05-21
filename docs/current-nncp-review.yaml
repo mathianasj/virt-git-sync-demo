@@ -1,0 +1,237 @@
+---
+# Current NodeNetworkConfigurationPolicy for BGP Peering Interface
+# This is what we're applying to configure the secondary ENI
+
+apiVersion: nmstate.io/v1
+kind: NodeNetworkConfigurationPolicy
+metadata:
+  name: worker-bgp-peering-interface
+
+spec:
+  # Target only c5.metal bare metal worker nodes
+  nodeSelector:
+    node-role.kubernetes.io/worker-cnv: ""
+
+  desiredState:
+    interfaces:
+      # Secondary interface (detected dynamically, typically enp126s0)
+      - name: "{{ hub_secondary_if }}"  # Variable - detected interface name
+        type: ethernet
+        state: up
+        ipv4:
+          enabled: true
+          dhcp: true                # Get IP address from DHCP in BGP peering subnet
+          auto-dns: false           # Don't accept DNS from DHCP on this interface
+          auto-gateway: false       # CRITICAL: Don't set default gateway
+          auto-routes: false        # CRITICAL: Don't install any routes
+        ipv6:
+          enabled: false
+
+# ==========================================
+# What this DOES:
+# ==========================================
+# ✓ Brings secondary interface UP
+# ✓ Gets IP address from DHCP (10.0.14.x for hub, 10.1.14.x for managed)
+# ✓ Interface becomes reachable for BGP peering
+
+# ==========================================
+# What this DOES NOT do (Safety):
+# ==========================================
+# ✗ Does NOT add any routes
+# ✗ Does NOT set default gateway
+# ✗ Does NOT modify DNS
+# ✗ Does NOT touch primary interface (br-ex)
+# ✗ Does NOT modify main routing table (254)
+
+# ==========================================
+# Potential Issues to Review:
+# ==========================================
+
+# ISSUE 1: Interface Name Detection
+# - Currently detects with: grep -v "lo:\|br-ex:\|ovs-system:\|ovn-k8s-:\|genev_sys_:\|enp125s0:"
+# - Assumes enp126s0 if detection fails
+# - What if interface name is different? (e.g., ens6, eth1, etc.)
+
+# ISSUE 2: No Explicit MTU Setting
+# - Using default MTU (likely 1500 or 9000 from ENI)
+# - Should we explicitly set MTU to match BGP peering subnet requirements?
+
+# ISSUE 3: No MAC Address Verification
+# - Not validating that the interface corresponds to the correct ENI
+# - Could potentially configure wrong interface if naming is unexpected
+
+# ISSUE 4: IPv6 Disabled
+# - Currently ipv6: enabled: false
+# - Is this correct for your environment?
+
+# ISSUE 5: DHCP Timeout/Retry Settings
+# - Using default nmstate DHCP timeout
+# - Should we configure custom DHCP timeout values?
+
+# ISSUE 6: No Interface Description/Comment
+# - nmstate supports adding descriptions to interfaces
+# - Could help with documentation/troubleshooting
+
+# ==========================================
+# Alternative/Enhanced Configurations:
+# ==========================================
+
+---
+# OPTION 1: More explicit interface identification by MAC address
+apiVersion: nmstate.io/v1
+kind: NodeNetworkConfigurationPolicy
+metadata:
+  name: worker-bgp-peering-interface-mac
+spec:
+  nodeSelector:
+    node-role.kubernetes.io/worker-cnv: ""
+  desiredState:
+    interfaces:
+      - name: enp126s0
+        type: ethernet
+        state: up
+        mac-address: "{{ worker_bgp_eni_mac }}"  # Would need to look this up per node
+        ipv4:
+          enabled: true
+          dhcp: true
+          auto-dns: false
+          auto-gateway: false
+          auto-routes: false
+        ipv6:
+          enabled: false
+
+---
+# OPTION 2: With explicit MTU setting
+apiVersion: nmstate.io/v1
+kind: NodeNetworkConfigurationPolicy
+metadata:
+  name: worker-bgp-peering-interface-mtu
+spec:
+  nodeSelector:
+    node-role.kubernetes.io/worker-cnv: ""
+  desiredState:
+    interfaces:
+      - name: "{{ hub_secondary_if }}"
+        type: ethernet
+        state: up
+        mtu: 9000  # Jumbo frames for better performance
+        ipv4:
+          enabled: true
+          dhcp: true
+          auto-dns: false
+          auto-gateway: false
+          auto-routes: false
+        ipv6:
+          enabled: false
+
+---
+# OPTION 3: Static IP instead of DHCP (more predictable)
+apiVersion: nmstate.io/v1
+kind: NodeNetworkConfigurationPolicy
+metadata:
+  name: worker-bgp-peering-interface-static
+spec:
+  nodeSelector:
+    node-role.kubernetes.io/worker-cnv: ""
+  desiredState:
+    interfaces:
+      - name: "{{ hub_secondary_if }}"
+        type: ethernet
+        state: up
+        ipv4:
+          enabled: true
+          dhcp: false  # Static IP
+          address:
+            - ip: "{{ worker_bgp_ip }}"  # Would need to be unique per node
+              prefix-length: 24
+          auto-dns: false
+          auto-gateway: false
+          auto-routes: false
+        ipv6:
+          enabled: false
+
+---
+# OPTION 4: Current config with better interface detection
+apiVersion: nmstate.io/v1
+kind: NodeNetworkConfigurationPolicy
+metadata:
+  name: worker-bgp-peering-interface-enhanced
+spec:
+  nodeSelector:
+    node-role.kubernetes.io/worker-cnv: ""
+  desiredState:
+    interfaces:
+      # Use capture to match secondary ENI dynamically
+      - name: "{{ hub_secondary_if }}"
+        type: ethernet
+        state: up
+        identifier: mac-address  # Use MAC to identify instead of name
+        ipv4:
+          enabled: true
+          dhcp: true
+          dhcp-client-id: "{{ inventory_hostname }}"  # Helps with DHCP reservations
+          auto-dns: false
+          auto-gateway: false
+          auto-routes: false
+        ipv6:
+          enabled: false
+
+---
+# OPTION 5: With verification - explicitly state what we DON'T want
+apiVersion: nmstate.io/v1
+kind: NodeNetworkConfigurationPolicy
+metadata:
+  name: worker-bgp-peering-interface-explicit
+spec:
+  nodeSelector:
+    node-role.kubernetes.io/worker-cnv: ""
+  desiredState:
+    interfaces:
+      - name: "{{ hub_secondary_if }}"
+        type: ethernet
+        state: up
+        ipv4:
+          enabled: true
+          dhcp: true
+          auto-dns: false
+          auto-gateway: false
+          auto-routes: false
+        ipv6:
+          enabled: false
+
+    # Explicitly state no routes should be added
+    routes:
+      config: []  # Empty routes - no changes to routing table
+
+    # Explicitly state DNS should not be modified
+    dns-resolver:
+      config:
+        server: []  # No DNS changes
+
+---
+# Questions to Consider:
+# ==========================================
+
+# 1. Should we use static IPs instead of DHCP?
+#    - Pro: More predictable, no DHCP dependency
+#    - Con: Need to track IPs per node, more complex
+
+# 2. Should we set explicit MTU?
+#    - What MTU does the BGP peering subnet use?
+#    - AWS default is 9001 for enhanced networking
+
+# 3. Should we validate MAC address?
+#    - Ensures we're configuring the correct ENI
+#    - Requires dynamic lookup per node
+
+# 4. Should we explicitly state routes: config: [] ?
+#    - More explicit that we don't want routes
+#    - Redundant with auto-routes: false?
+
+# 5. Interface naming concerns?
+#    - Current detection might fail on different instance types
+#    - Should we make it more robust?
+
+# 6. Do we need per-node customization?
+#    - Currently same NNCP applies to all worker-cnv nodes
+#    - What if different nodes need different configs?

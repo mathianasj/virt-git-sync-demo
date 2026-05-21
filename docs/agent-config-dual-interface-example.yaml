@@ -1,0 +1,380 @@
+---
+# OpenShift Agent-based Installer - agent-config.yaml
+# Dual interface configuration with default route on second interface
+
+apiVersion: v1beta1
+kind: AgentConfig
+metadata:
+  name: example-cluster
+rendezvousIP: 192.168.1.10  # IP of one of the nodes for bootstrap
+
+# Host-specific network configuration
+hosts:
+  - hostname: worker-1
+    role: worker
+    rootDeviceHints:
+      deviceName: /dev/sda
+
+    # Network interface configuration using NMState format
+    interfaces:
+      - name: eth0
+        type: ethernet
+        state: up
+        mac-address: "52:54:00:00:00:01"
+        ipv4:
+          enabled: true
+          dhcp: false
+          address:
+            - ip: 192.168.1.10
+              prefix-length: 24
+          auto-dns: false
+          auto-gateway: false
+          auto-routes: false
+        ipv6:
+          enabled: false
+
+      - name: eth1
+        type: ethernet
+        state: up
+        mac-address: "52:54:00:00:00:02"
+        ipv4:
+          enabled: true
+          dhcp: false
+          address:
+            - ip: 192.168.2.10
+              prefix-length: 24
+          auto-dns: false
+          auto-gateway: false
+          auto-routes: false
+        ipv6:
+          enabled: false
+
+    # Network configuration (routes and DNS)
+    networkConfig:
+      interfaces:
+        - name: eth0
+          type: ethernet
+          state: up
+          mac-address: "52:54:00:00:00:01"
+          ipv4:
+            enabled: true
+            dhcp: false
+            address:
+              - ip: 192.168.1.10
+                prefix-length: 24
+            auto-dns: false
+            auto-gateway: false
+            auto-routes: false
+          ipv6:
+            enabled: false
+
+        - name: eth1
+          type: ethernet
+          state: up
+          mac-address: "52:54:00:00:00:02"
+          ipv4:
+            enabled: true
+            dhcp: false
+            address:
+              - ip: 192.168.2.10
+                prefix-length: 24
+            auto-dns: false
+            auto-gateway: false
+            auto-routes: false
+          ipv6:
+            enabled: false
+
+      # DNS configuration
+      dns-resolver:
+        config:
+          server:
+            - 8.8.8.8
+            - 8.8.4.4
+          search:
+            - example.com
+
+      # Route configuration
+      routes:
+        config:
+          # Default route via eth1
+          - destination: 0.0.0.0/0
+            next-hop-address: 192.168.2.1
+            next-hop-interface: eth1
+            table-id: 254
+
+          # Specific route via eth0
+          - destination: 10.0.0.0/8
+            next-hop-address: 192.168.1.1
+            next-hop-interface: eth0
+            table-id: 254
+
+  - hostname: worker-2
+    role: worker
+    rootDeviceHints:
+      deviceName: /dev/sda
+
+    networkConfig:
+      interfaces:
+        - name: eth0
+          type: ethernet
+          state: up
+          mac-address: "52:54:00:00:01:01"
+          ipv4:
+            enabled: true
+            dhcp: false
+            address:
+              - ip: 192.168.1.11
+                prefix-length: 24
+            auto-dns: false
+            auto-gateway: false
+            auto-routes: false
+
+        - name: eth1
+          type: ethernet
+          state: up
+          mac-address: "52:54:00:00:01:02"
+          ipv4:
+            enabled: true
+            dhcp: false
+            address:
+              - ip: 192.168.2.11
+                prefix-length: 24
+            auto-dns: false
+            auto-gateway: false
+            auto-routes: false
+
+      dns-resolver:
+        config:
+          server:
+            - 8.8.8.8
+            - 8.8.4.4
+
+      routes:
+        config:
+          # Default route via eth1
+          - destination: 0.0.0.0/0
+            next-hop-address: 192.168.2.1
+            next-hop-interface: eth1
+
+---
+# Example 2: DHCP on first interface (no routes), Static on second with default route
+apiVersion: v1beta1
+kind: AgentConfig
+metadata:
+  name: dhcp-static-cluster
+rendezvousIP: 192.168.1.10
+
+hosts:
+  - hostname: worker-1
+    role: worker
+    rootDeviceHints:
+      deviceName: /dev/sda
+
+    networkConfig:
+      interfaces:
+        # First interface - DHCP IP only, no routes
+        - name: enp1s0
+          type: ethernet
+          state: up
+          mac-address: "52:54:00:00:00:01"
+          ipv4:
+            enabled: true
+            dhcp: true
+            auto-dns: false
+            auto-gateway: false       # CRITICAL: No default gateway
+            auto-routes: false        # CRITICAL: No routes from DHCP
+
+        # Second interface - Static with default route
+        - name: enp2s0
+          type: ethernet
+          state: up
+          mac-address: "52:54:00:00:00:02"
+          ipv4:
+            enabled: true
+            dhcp: false
+            address:
+              - ip: 10.0.14.10
+                prefix-length: 24
+            auto-dns: false
+            auto-gateway: false
+            auto-routes: false
+
+      dns-resolver:
+        config:
+          server:
+            - 1.1.1.1
+            - 1.0.0.1
+
+      routes:
+        config:
+          # Default route via second interface
+          - destination: 0.0.0.0/0
+            next-hop-address: 10.0.14.1
+            next-hop-interface: enp2s0
+            metric: 100
+
+---
+# Example 3: Bonded interfaces with VLAN
+apiVersion: v1beta1
+kind: AgentConfig
+metadata:
+  name: bond-vlan-cluster
+rendezvousIP: 192.168.100.10
+
+hosts:
+  - hostname: worker-1
+    role: worker
+    rootDeviceHints:
+      deviceName: /dev/sda
+
+    networkConfig:
+      interfaces:
+        # Physical interfaces for bonding
+        - name: eth0
+          type: ethernet
+          state: up
+          mac-address: "52:54:00:00:00:01"
+          ipv4:
+            enabled: false
+          ipv6:
+            enabled: false
+
+        - name: eth1
+          type: ethernet
+          state: up
+          mac-address: "52:54:00:00:00:02"
+          ipv4:
+            enabled: false
+          ipv6:
+            enabled: false
+
+        # Bond interface
+        - name: bond0
+          type: bond
+          state: up
+          link-aggregation:
+            mode: active-backup
+            port:
+              - eth0
+              - eth1
+            options:
+              miimon: 100
+          ipv4:
+            enabled: false
+          ipv6:
+            enabled: false
+
+        # VLAN on bond
+        - name: bond0.100
+          type: vlan
+          state: up
+          vlan:
+            base-iface: bond0
+            id: 100
+          ipv4:
+            enabled: true
+            dhcp: false
+            address:
+              - ip: 192.168.100.10
+                prefix-length: 24
+            auto-dns: false
+            auto-gateway: false
+            auto-routes: false
+
+      dns-resolver:
+        config:
+          server:
+            - 192.168.100.1
+
+      routes:
+        config:
+          # Default route via VLAN
+          - destination: 0.0.0.0/0
+            next-hop-address: 192.168.100.1
+            next-hop-interface: bond0.100
+
+---
+# Example 4: Real-world BGP peering subnet scenario
+# This matches our actual use case
+apiVersion: v1beta1
+kind: AgentConfig
+metadata:
+  name: bgp-peering-cluster
+rendezvousIP: 10.0.11.10
+
+hosts:
+  - hostname: hub-worker-1
+    role: worker
+    rootDeviceHints:
+      deviceName: /dev/sda
+
+    networkConfig:
+      interfaces:
+        # Primary interface - Worker subnet (cluster networking)
+        - name: enp125s0
+          type: ethernet
+          state: up
+          mac-address: "02:00:00:00:00:01"
+          ipv4:
+            enabled: true
+            dhcp: true                # Get IP from VPC DHCP
+            auto-dns: true            # Accept DNS for cluster
+            auto-gateway: true        # Accept default gateway
+            auto-routes: true         # Accept VPC routes
+          ipv6:
+            enabled: false
+
+        # Secondary interface - BGP peering subnet (BGP only, no routes)
+        - name: enp126s0
+          type: ethernet
+          state: up
+          mac-address: "02:00:00:00:00:02"
+          ipv4:
+            enabled: true
+            dhcp: true                # Get IP from BGP peering subnet DHCP
+            auto-dns: false           # Don't override cluster DNS
+            auto-gateway: false       # CRITICAL: No default gateway
+            auto-routes: false        # CRITICAL: No routes
+          ipv6:
+            enabled: false
+
+      # DNS comes from primary interface DHCP
+      dns-resolver:
+        config:
+          server: []  # Will be set by DHCP on enp125s0
+
+      # Routes come from primary interface
+      # No manual routes needed - VPC route table handles default route
+
+  - hostname: hub-worker-2
+    role: worker
+    rootDeviceHints:
+      deviceName: /dev/sda
+
+    networkConfig:
+      interfaces:
+        - name: enp125s0
+          type: ethernet
+          state: up
+          mac-address: "02:00:00:01:00:01"
+          ipv4:
+            enabled: true
+            dhcp: true
+            auto-dns: true
+            auto-gateway: true
+            auto-routes: true
+
+        - name: enp126s0
+          type: ethernet
+          state: up
+          mac-address: "02:00:00:01:00:02"
+          ipv4:
+            enabled: true
+            dhcp: true
+            auto-dns: false
+            auto-gateway: false
+            auto-routes: false
+
+      dns-resolver:
+        config:
+          server: []

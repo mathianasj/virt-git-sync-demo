@@ -1,0 +1,315 @@
+---
+# Example: nmstate NodeNetworkConfigurationPolicy with dual interfaces
+# This shows how to configure two network interfaces with:
+# - First interface (eth0): Static IP, no default route
+# - Second interface (eth1): Static IP with default route and DNS
+
+apiVersion: nmstate.io/v1
+kind: NodeNetworkConfigurationPolicy
+metadata:
+  name: dual-interface-example
+spec:
+  # Target specific nodes with a label
+  nodeSelector:
+    node-role.kubernetes.io/worker: ""
+
+  desiredState:
+    # DNS configuration (global for all interfaces)
+    dns-resolver:
+      config:
+        server:
+          - 8.8.8.8
+          - 8.8.4.4
+        search:
+          - example.com
+          - cluster.local
+
+    # Route configuration
+    routes:
+      config:
+        # Default route via second interface (eth1)
+        - destination: 0.0.0.0/0
+          next-hop-interface: eth1
+          next-hop-address: 192.168.2.1
+          metric: 100
+          table-id: 254  # Main routing table
+
+        # Specific route via first interface (eth0)
+        - destination: 10.0.0.0/8
+          next-hop-interface: eth0
+          next-hop-address: 192.168.1.1
+          metric: 200
+          table-id: 254
+
+    # Interface configuration
+    interfaces:
+      # First interface - Static IP, no default route
+      - name: eth0
+        type: ethernet
+        state: up
+        ipv4:
+          enabled: true
+          dhcp: false
+          address:
+            - ip: 192.168.1.10
+              prefix-length: 24
+          auto-dns: false
+          auto-gateway: false  # Don't set default gateway from this interface
+          auto-routes: false   # Don't add any automatic routes
+        ipv6:
+          enabled: false
+
+      # Second interface - Static IP with default route
+      - name: eth1
+        type: ethernet
+        state: up
+        ipv4:
+          enabled: true
+          dhcp: false
+          address:
+            - ip: 192.168.2.10
+              prefix-length: 24
+          auto-dns: false      # We're setting DNS manually above
+          auto-gateway: false  # We're setting gateway manually in routes
+          auto-routes: false   # We're defining routes manually
+        ipv6:
+          enabled: false
+
+---
+# Example 2: DHCP on both interfaces, but default route only on second interface
+apiVersion: nmstate.io/v1
+kind: NodeNetworkConfigurationPolicy
+metadata:
+  name: dual-interface-dhcp-example
+spec:
+  nodeSelector:
+    node-role.kubernetes.io/worker: ""
+
+  desiredState:
+    # DNS from DHCP on eth1
+    dns-resolver:
+      config:
+        server: []  # Will be populated by DHCP on eth1
+
+    routes:
+      config:
+        # Default route will come from DHCP on eth1
+        # But we can add static routes if needed
+        - destination: 10.0.0.0/8
+          next-hop-interface: eth0
+          metric: 200
+
+    interfaces:
+      # First interface - DHCP IP, but NO routes or gateway
+      - name: eth0
+        type: ethernet
+        state: up
+        ipv4:
+          enabled: true
+          dhcp: true
+          auto-dns: false      # Don't use DNS from this DHCP
+          auto-gateway: false  # CRITICAL: Don't set default gateway
+          auto-routes: false   # CRITICAL: Don't install any routes
+        ipv6:
+          enabled: false
+
+      # Second interface - DHCP IP with routes and gateway
+      - name: eth1
+        type: ethernet
+        state: up
+        ipv4:
+          enabled: true
+          dhcp: true
+          auto-dns: true       # Accept DNS from DHCP on this interface
+          auto-gateway: true   # Accept default gateway from DHCP
+          auto-routes: true    # Accept routes from DHCP
+        ipv6:
+          enabled: false
+
+---
+# Example 3: Mixed - First interface DHCP (no routes), Second interface Static with default route
+apiVersion: nmstate.io/v1
+kind: NodeNetworkConfigurationPolicy
+metadata:
+  name: dual-interface-mixed-example
+spec:
+  nodeSelector:
+    node-role.kubernetes.io/worker: ""
+
+  desiredState:
+    # Static DNS configuration
+    dns-resolver:
+      config:
+        server:
+          - 1.1.1.1
+          - 1.0.0.1
+        search:
+          - example.com
+
+    routes:
+      config:
+        # Default route via eth1 (static interface)
+        - destination: 0.0.0.0/0
+          next-hop-interface: eth1
+          next-hop-address: 10.0.14.1
+          metric: 100
+
+    interfaces:
+      # First interface - DHCP for IP only, no routes
+      - name: enp125s0
+        type: ethernet
+        state: up
+        mtu: 9000  # Jumbo frames example
+        ipv4:
+          enabled: true
+          dhcp: true
+          auto-dns: false
+          auto-gateway: false
+          auto-routes: false
+        ipv6:
+          enabled: false
+
+      # Second interface - Static IP with default route
+      - name: enp126s0
+        type: ethernet
+        state: up
+        mtu: 1500
+        ipv4:
+          enabled: true
+          dhcp: false
+          address:
+            - ip: 10.0.14.100
+              prefix-length: 24
+          auto-dns: false
+          auto-gateway: false
+          auto-routes: false
+        ipv6:
+          enabled: false
+
+---
+# Example 4: VLAN interface on second interface with default route
+apiVersion: nmstate.io/v1
+kind: NodeNetworkConfigurationPolicy
+metadata:
+  name: dual-interface-vlan-example
+spec:
+  nodeSelector:
+    node-role.kubernetes.io/worker: ""
+
+  desiredState:
+    dns-resolver:
+      config:
+        server:
+          - 192.168.100.1
+
+    routes:
+      config:
+        # Default route via VLAN interface on eth1
+        - destination: 0.0.0.0/0
+          next-hop-interface: eth1.100
+          next-hop-address: 192.168.100.1
+          metric: 100
+
+    interfaces:
+      # First interface - Base interface, no IP
+      - name: eth0
+        type: ethernet
+        state: up
+        ipv4:
+          enabled: false
+        ipv6:
+          enabled: false
+
+      # Second interface - Base interface for VLAN
+      - name: eth1
+        type: ethernet
+        state: up
+        ipv4:
+          enabled: false
+        ipv6:
+          enabled: false
+
+      # VLAN interface on eth1
+      - name: eth1.100
+        type: vlan
+        state: up
+        vlan:
+          base-iface: eth1
+          id: 100
+        ipv4:
+          enabled: true
+          dhcp: false
+          address:
+            - ip: 192.168.100.10
+              prefix-length: 24
+          auto-dns: false
+          auto-gateway: false
+          auto-routes: false
+        ipv6:
+          enabled: false
+
+---
+# Example 5: Bond interface with default route
+apiVersion: nmstate.io/v1
+kind: NodeNetworkConfigurationPolicy
+metadata:
+  name: dual-interface-bond-example
+spec:
+  nodeSelector:
+    node-role.kubernetes.io/worker: ""
+
+  desiredState:
+    dns-resolver:
+      config:
+        server:
+          - 10.0.0.1
+
+    routes:
+      config:
+        # Default route via bond interface
+        - destination: 0.0.0.0/0
+          next-hop-interface: bond0
+          next-hop-address: 10.0.0.1
+          metric: 100
+
+    interfaces:
+      # First interface - Member of bond
+      - name: eth0
+        type: ethernet
+        state: up
+        ipv4:
+          enabled: false
+        ipv6:
+          enabled: false
+
+      # Second interface - Member of bond
+      - name: eth1
+        type: ethernet
+        state: up
+        ipv4:
+          enabled: false
+        ipv6:
+          enabled: false
+
+      # Bond interface
+      - name: bond0
+        type: bond
+        state: up
+        link-aggregation:
+          mode: active-backup  # or balance-rr, 802.3ad, etc.
+          port:
+            - eth0
+            - eth1
+          options:
+            miimon: 100
+        ipv4:
+          enabled: true
+          dhcp: false
+          address:
+            - ip: 10.0.0.10
+              prefix-length: 24
+          auto-dns: false
+          auto-gateway: false
+          auto-routes: false
+        ipv6:
+          enabled: false

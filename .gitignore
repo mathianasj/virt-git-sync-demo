@@ -39,3 +39,27 @@ pull-secret.txt
 # Temporary files
 *.tmp
 *.bak
+temp/
+
+# Debug/troubleshooting playbooks (numbered 20+)
+playbooks/0[0-9][a-z]-*.yml
+playbooks/[2-9][0-9]-*.yml
+playbooks/[0-9][0-9][0-9]-*.yml
+playbooks/[0-9][0-9][0-9][0-9]-*.yml
+playbooks/check-*.yml
+playbooks/debug-*.yml
+playbooks/diagnose-*.yml
+playbooks/fix-*.yml
+playbooks/verify-*.yml
+playbooks/validate-*.yml
+playbooks/show-*.yml
+playbooks/proof-*.yml
+playbooks/quick-*.yml
+playbooks/restart-*.yml
+playbooks/cleanup-*.yml
+playbooks/configure_*.yml
+playbooks/files/
+playbooks/archive/
+
+# Test scripts
+run-*.sh

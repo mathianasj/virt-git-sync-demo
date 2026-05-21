@@ -1,0 +1,510 @@
+---
+# OpenShift Agent-based Installer Configuration
+# Dual interface setup with default route on second interface
+
+apiVersion: v1beta1
+kind: AgentConfig
+metadata:
+  name: dual-interface-cluster
+rendezvousIP: 192.168.1.10  # First control plane node IP
+
+hosts:
+  # Control Plane Node 1
+  - hostname: control-plane-1
+    role: master
+    rootDeviceHints:
+      deviceName: /dev/sda
+
+    networkConfig:
+      # Interface definitions
+      interfaces:
+        # First interface - No default route
+        - name: eth0
+          type: ethernet
+          state: up
+          mac-address: "52:54:00:00:00:01"
+          ipv4:
+            enabled: true
+            dhcp: false
+            address:
+              - ip: 192.168.1.10
+                prefix-length: 24
+            auto-dns: false
+            auto-gateway: false
+            auto-routes: false
+          ipv6:
+            enabled: false
+
+        # Second interface - Default route goes here
+        - name: eth1
+          type: ethernet
+          state: up
+          mac-address: "52:54:00:00:00:02"
+          ipv4:
+            enabled: true
+            dhcp: false
+            address:
+              - ip: 192.168.2.10
+                prefix-length: 24
+            auto-dns: false
+            auto-gateway: false
+            auto-routes: false
+          ipv6:
+            enabled: false
+
+      # DNS configuration
+      dns-resolver:
+        config:
+          server:
+            - 8.8.8.8
+            - 8.8.4.4
+          search:
+            - example.com
+            - cluster.local
+
+      # Routes configuration
+      routes:
+        config:
+          # Default route via second interface (eth1)
+          - destination: 0.0.0.0/0
+            next-hop-address: 192.168.2.1
+            next-hop-interface: eth1
+            table-id: 254
+
+          # Optional: Specific route via first interface (eth0)
+          - destination: 10.0.0.0/8
+            next-hop-address: 192.168.1.1
+            next-hop-interface: eth0
+            table-id: 254
+
+  # Control Plane Node 2
+  - hostname: control-plane-2
+    role: master
+    rootDeviceHints:
+      deviceName: /dev/sda
+
+    networkConfig:
+      interfaces:
+        - name: eth0
+          type: ethernet
+          state: up
+          mac-address: "52:54:00:00:01:01"
+          ipv4:
+            enabled: true
+            dhcp: false
+            address:
+              - ip: 192.168.1.11
+                prefix-length: 24
+            auto-dns: false
+            auto-gateway: false
+            auto-routes: false
+          ipv6:
+            enabled: false
+
+        - name: eth1
+          type: ethernet
+          state: up
+          mac-address: "52:54:00:00:01:02"
+          ipv4:
+            enabled: true
+            dhcp: false
+            address:
+              - ip: 192.168.2.11
+                prefix-length: 24
+            auto-dns: false
+            auto-gateway: false
+            auto-routes: false
+          ipv6:
+            enabled: false
+
+      dns-resolver:
+        config:
+          server:
+            - 8.8.8.8
+            - 8.8.4.4
+          search:
+            - example.com
+            - cluster.local
+
+      routes:
+        config:
+          - destination: 0.0.0.0/0
+            next-hop-address: 192.168.2.1
+            next-hop-interface: eth1
+            table-id: 254
+
+  # Control Plane Node 3
+  - hostname: control-plane-3
+    role: master
+    rootDeviceHints:
+      deviceName: /dev/sda
+
+    networkConfig:
+      interfaces:
+        - name: eth0
+          type: ethernet
+          state: up
+          mac-address: "52:54:00:00:02:01"
+          ipv4:
+            enabled: true
+            dhcp: false
+            address:
+              - ip: 192.168.1.12
+                prefix-length: 24
+            auto-dns: false
+            auto-gateway: false
+            auto-routes: false
+          ipv6:
+            enabled: false
+
+        - name: eth1
+          type: ethernet
+          state: up
+          mac-address: "52:54:00:00:02:02"
+          ipv4:
+            enabled: true
+            dhcp: false
+            address:
+              - ip: 192.168.2.12
+                prefix-length: 24
+            auto-dns: false
+            auto-gateway: false
+            auto-routes: false
+          ipv6:
+            enabled: false
+
+      dns-resolver:
+        config:
+          server:
+            - 8.8.8.8
+            - 8.8.4.4
+          search:
+            - example.com
+            - cluster.local
+
+      routes:
+        config:
+          - destination: 0.0.0.0/0
+            next-hop-address: 192.168.2.1
+            next-hop-interface: eth1
+            table-id: 254
+
+  # Worker Node 1
+  - hostname: worker-1
+    role: worker
+    rootDeviceHints:
+      deviceName: /dev/sda
+
+    networkConfig:
+      interfaces:
+        - name: eth0
+          type: ethernet
+          state: up
+          mac-address: "52:54:00:00:03:01"
+          ipv4:
+            enabled: true
+            dhcp: false
+            address:
+              - ip: 192.168.1.20
+                prefix-length: 24
+            auto-dns: false
+            auto-gateway: false
+            auto-routes: false
+          ipv6:
+            enabled: false
+
+        - name: eth1
+          type: ethernet
+          state: up
+          mac-address: "52:54:00:00:03:02"
+          ipv4:
+            enabled: true
+            dhcp: false
+            address:
+              - ip: 192.168.2.20
+                prefix-length: 24
+            auto-dns: false
+            auto-gateway: false
+            auto-routes: false
+          ipv6:
+            enabled: false
+
+      dns-resolver:
+        config:
+          server:
+            - 8.8.8.8
+            - 8.8.4.4
+          search:
+            - example.com
+            - cluster.local
+
+      routes:
+        config:
+          - destination: 0.0.0.0/0
+            next-hop-address: 192.168.2.1
+            next-hop-interface: eth1
+            table-id: 254
+
+  # Worker Node 2
+  - hostname: worker-2
+    role: worker
+    rootDeviceHints:
+      deviceName: /dev/sda
+
+    networkConfig:
+      interfaces:
+        - name: eth0
+          type: ethernet
+          state: up
+          mac-address: "52:54:00:00:04:01"
+          ipv4:
+            enabled: true
+            dhcp: false
+            address:
+              - ip: 192.168.1.21
+                prefix-length: 24
+            auto-dns: false
+            auto-gateway: false
+            auto-routes: false
+          ipv6:
+            enabled: false
+
+        - name: eth1
+          type: ethernet
+          state: up
+          mac-address: "52:54:00:00:04:02"
+          ipv4:
+            enabled: true
+            dhcp: false
+            address:
+              - ip: 192.168.2.21
+                prefix-length: 24
+            auto-dns: false
+            auto-gateway: false
+            auto-routes: false
+          ipv6:
+            enabled: false
+
+      dns-resolver:
+        config:
+          server:
+            - 8.8.8.8
+            - 8.8.4.4
+          search:
+            - example.com
+            - cluster.local
+
+      routes:
+        config:
+          - destination: 0.0.0.0/0
+            next-hop-address: 192.168.2.1
+            next-hop-interface: eth1
+            table-id: 254
+
+---
+# ALTERNATIVE: Using DHCP on first interface (no routes), Static on second interface
+apiVersion: v1beta1
+kind: AgentConfig
+metadata:
+  name: dhcp-static-cluster
+rendezvousIP: 192.168.1.10
+
+hosts:
+  - hostname: control-plane-1
+    role: master
+    rootDeviceHints:
+      deviceName: /dev/sda
+
+    networkConfig:
+      interfaces:
+        # First interface - DHCP for IP only, NO routes
+        - name: eth0
+          type: ethernet
+          state: up
+          mac-address: "52:54:00:00:00:01"
+          ipv4:
+            enabled: true
+            dhcp: true                # Get IP from DHCP
+            auto-dns: false           # Don't use DNS from DHCP
+            auto-gateway: false       # CRITICAL: No default gateway
+            auto-routes: false        # CRITICAL: No routes from DHCP
+          ipv6:
+            enabled: false
+
+        # Second interface - Static IP with default route
+        - name: eth1
+          type: ethernet
+          state: up
+          mac-address: "52:54:00:00:00:02"
+          ipv4:
+            enabled: true
+            dhcp: false               # Static IP
+            address:
+              - ip: 192.168.2.10
+                prefix-length: 24
+            auto-dns: false
+            auto-gateway: false
+            auto-routes: false
+          ipv6:
+            enabled: false
+
+      # DNS configuration (manual)
+      dns-resolver:
+        config:
+          server:
+            - 1.1.1.1
+            - 1.0.0.1
+          search:
+            - example.com
+
+      # Routes - Default via second interface
+      routes:
+        config:
+          - destination: 0.0.0.0/0
+            next-hop-address: 192.168.2.1
+            next-hop-interface: eth1
+            table-id: 254
+
+  - hostname: worker-1
+    role: worker
+    rootDeviceHints:
+      deviceName: /dev/sda
+
+    networkConfig:
+      interfaces:
+        - name: eth0
+          type: ethernet
+          state: up
+          mac-address: "52:54:00:00:01:01"
+          ipv4:
+            enabled: true
+            dhcp: true
+            auto-dns: false
+            auto-gateway: false
+            auto-routes: false
+          ipv6:
+            enabled: false
+
+        - name: eth1
+          type: ethernet
+          state: up
+          mac-address: "52:54:00:00:01:02"
+          ipv4:
+            enabled: true
+            dhcp: false
+            address:
+              - ip: 192.168.2.20
+                prefix-length: 24
+            auto-dns: false
+            auto-gateway: false
+            auto-routes: false
+          ipv6:
+            enabled: false
+
+      dns-resolver:
+        config:
+          server:
+            - 1.1.1.1
+            - 1.0.0.1
+          search:
+            - example.com
+
+      routes:
+        config:
+          - destination: 0.0.0.0/0
+            next-hop-address: 192.168.2.1
+            next-hop-interface: eth1
+            table-id: 254
+
+---
+# ALTERNATIVE: Both interfaces DHCP, but default route only on second
+apiVersion: v1beta1
+kind: AgentConfig
+metadata:
+  name: dual-dhcp-cluster
+rendezvousIP: 192.168.1.10
+
+hosts:
+  - hostname: control-plane-1
+    role: master
+    rootDeviceHints:
+      deviceName: /dev/sda
+
+    networkConfig:
+      interfaces:
+        # First interface - DHCP IP only, NO routes or gateway
+        - name: eth0
+          type: ethernet
+          state: up
+          mac-address: "52:54:00:00:00:01"
+          ipv4:
+            enabled: true
+            dhcp: true
+            auto-dns: false
+            auto-gateway: false       # No default gateway
+            auto-routes: false        # No routes
+          ipv6:
+            enabled: false
+
+        # Second interface - DHCP IP and accept gateway/routes
+        - name: eth1
+          type: ethernet
+          state: up
+          mac-address: "52:54:00:00:00:02"
+          ipv4:
+            enabled: true
+            dhcp: true
+            auto-dns: true            # Accept DNS from DHCP
+            auto-gateway: true        # Accept default gateway
+            auto-routes: true         # Accept routes
+          ipv6:
+            enabled: false
+
+      # DNS will come from DHCP on eth1
+      dns-resolver:
+        config:
+          server: []
+
+      # Routes will come from DHCP on eth1
+      routes:
+        config: []
+
+  - hostname: worker-1
+    role: worker
+    rootDeviceHints:
+      deviceName: /dev/sda
+
+    networkConfig:
+      interfaces:
+        - name: eth0
+          type: ethernet
+          state: up
+          mac-address: "52:54:00:00:01:01"
+          ipv4:
+            enabled: true
+            dhcp: true
+            auto-dns: false
+            auto-gateway: false
+            auto-routes: false
+          ipv6:
+            enabled: false
+
+        - name: eth1
+          type: ethernet
+          state: up
+          mac-address: "52:54:00:00:01:02"
+          ipv4:
+            enabled: true
+            dhcp: true
+            auto-dns: true
+            auto-gateway: true
+            auto-routes: true
+          ipv6:
+            enabled: false
+
+      dns-resolver:
+        config:
+          server: []
+
+      routes:
+        config: []

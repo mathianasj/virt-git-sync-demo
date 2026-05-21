@@ -1,0 +1,391 @@
+---
+# OpenShift Agent-based Installer Configuration
+# ALL STATIC IPs - NO DHCP
+# Dual interface setup with default route on second interface
+
+apiVersion: v1beta1
+kind: AgentConfig
+metadata:
+  name: all-static-cluster
+rendezvousIP: 192.168.1.10  # First control plane node IP on eth0
+
+hosts:
+  # ==========================================
+  # CONTROL PLANE NODES
+  # ==========================================
+
+  # Control Plane Node 1
+  - hostname: control-plane-1
+    role: master
+    rootDeviceHints:
+      deviceName: /dev/sda
+
+    networkConfig:
+      interfaces:
+        # First interface - Static IP, NO default route
+        - name: eth0
+          type: ethernet
+          state: up
+          mac-address: "52:54:00:00:00:01"
+          ipv4:
+            enabled: true
+            dhcp: false               # Static IP
+            address:
+              - ip: 192.168.1.10
+                prefix-length: 24
+            auto-dns: false
+            auto-gateway: false
+            auto-routes: false
+          ipv6:
+            enabled: false
+
+        # Second interface - Static IP with default route
+        - name: eth1
+          type: ethernet
+          state: up
+          mac-address: "52:54:00:00:00:02"
+          ipv4:
+            enabled: true
+            dhcp: false               # Static IP
+            address:
+              - ip: 192.168.2.10
+                prefix-length: 24
+            auto-dns: false
+            auto-gateway: false
+            auto-routes: false
+          ipv6:
+            enabled: false
+
+      # DNS servers
+      dns-resolver:
+        config:
+          server:
+            - 8.8.8.8
+            - 8.8.4.4
+          search:
+            - example.com
+            - cluster.local
+
+      # Routes
+      routes:
+        config:
+          # Default route via second interface (eth1)
+          - destination: 0.0.0.0/0
+            next-hop-address: 192.168.2.1
+            next-hop-interface: eth1
+            table-id: 254
+
+          # Optional: Specific network route via first interface
+          - destination: 10.0.0.0/8
+            next-hop-address: 192.168.1.1
+            next-hop-interface: eth0
+            table-id: 254
+
+  # Control Plane Node 2
+  - hostname: control-plane-2
+    role: master
+    rootDeviceHints:
+      deviceName: /dev/sda
+
+    networkConfig:
+      interfaces:
+        - name: eth0
+          type: ethernet
+          state: up
+          mac-address: "52:54:00:00:01:01"
+          ipv4:
+            enabled: true
+            dhcp: false
+            address:
+              - ip: 192.168.1.11
+                prefix-length: 24
+            auto-dns: false
+            auto-gateway: false
+            auto-routes: false
+          ipv6:
+            enabled: false
+
+        - name: eth1
+          type: ethernet
+          state: up
+          mac-address: "52:54:00:00:01:02"
+          ipv4:
+            enabled: true
+            dhcp: false
+            address:
+              - ip: 192.168.2.11
+                prefix-length: 24
+            auto-dns: false
+            auto-gateway: false
+            auto-routes: false
+          ipv6:
+            enabled: false
+
+      dns-resolver:
+        config:
+          server:
+            - 8.8.8.8
+            - 8.8.4.4
+          search:
+            - example.com
+            - cluster.local
+
+      routes:
+        config:
+          - destination: 0.0.0.0/0
+            next-hop-address: 192.168.2.1
+            next-hop-interface: eth1
+            table-id: 254
+
+          - destination: 10.0.0.0/8
+            next-hop-address: 192.168.1.1
+            next-hop-interface: eth0
+            table-id: 254
+
+  # Control Plane Node 3
+  - hostname: control-plane-3
+    role: master
+    rootDeviceHints:
+      deviceName: /dev/sda
+
+    networkConfig:
+      interfaces:
+        - name: eth0
+          type: ethernet
+          state: up
+          mac-address: "52:54:00:00:02:01"
+          ipv4:
+            enabled: true
+            dhcp: false
+            address:
+              - ip: 192.168.1.12
+                prefix-length: 24
+            auto-dns: false
+            auto-gateway: false
+            auto-routes: false
+          ipv6:
+            enabled: false
+
+        - name: eth1
+          type: ethernet
+          state: up
+          mac-address: "52:54:00:00:02:02"
+          ipv4:
+            enabled: true
+            dhcp: false
+            address:
+              - ip: 192.168.2.12
+                prefix-length: 24
+            auto-dns: false
+            auto-gateway: false
+            auto-routes: false
+          ipv6:
+            enabled: false
+
+      dns-resolver:
+        config:
+          server:
+            - 8.8.8.8
+            - 8.8.4.4
+          search:
+            - example.com
+            - cluster.local
+
+      routes:
+        config:
+          - destination: 0.0.0.0/0
+            next-hop-address: 192.168.2.1
+            next-hop-interface: eth1
+            table-id: 254
+
+          - destination: 10.0.0.0/8
+            next-hop-address: 192.168.1.1
+            next-hop-interface: eth0
+            table-id: 254
+
+  # ==========================================
+  # WORKER NODES
+  # ==========================================
+
+  # Worker Node 1
+  - hostname: worker-1
+    role: worker
+    rootDeviceHints:
+      deviceName: /dev/sda
+
+    networkConfig:
+      interfaces:
+        - name: eth0
+          type: ethernet
+          state: up
+          mac-address: "52:54:00:00:03:01"
+          ipv4:
+            enabled: true
+            dhcp: false
+            address:
+              - ip: 192.168.1.20
+                prefix-length: 24
+            auto-dns: false
+            auto-gateway: false
+            auto-routes: false
+          ipv6:
+            enabled: false
+
+        - name: eth1
+          type: ethernet
+          state: up
+          mac-address: "52:54:00:00:03:02"
+          ipv4:
+            enabled: true
+            dhcp: false
+            address:
+              - ip: 192.168.2.20
+                prefix-length: 24
+            auto-dns: false
+            auto-gateway: false
+            auto-routes: false
+          ipv6:
+            enabled: false
+
+      dns-resolver:
+        config:
+          server:
+            - 8.8.8.8
+            - 8.8.4.4
+          search:
+            - example.com
+            - cluster.local
+
+      routes:
+        config:
+          - destination: 0.0.0.0/0
+            next-hop-address: 192.168.2.1
+            next-hop-interface: eth1
+            table-id: 254
+
+          - destination: 10.0.0.0/8
+            next-hop-address: 192.168.1.1
+            next-hop-interface: eth0
+            table-id: 254
+
+  # Worker Node 2
+  - hostname: worker-2
+    role: worker
+    rootDeviceHints:
+      deviceName: /dev/sda
+
+    networkConfig:
+      interfaces:
+        - name: eth0
+          type: ethernet
+          state: up
+          mac-address: "52:54:00:00:04:01"
+          ipv4:
+            enabled: true
+            dhcp: false
+            address:
+              - ip: 192.168.1.21
+                prefix-length: 24
+            auto-dns: false
+            auto-gateway: false
+            auto-routes: false
+          ipv6:
+            enabled: false
+
+        - name: eth1
+          type: ethernet
+          state: up
+          mac-address: "52:54:00:00:04:02"
+          ipv4:
+            enabled: true
+            dhcp: false
+            address:
+              - ip: 192.168.2.21
+                prefix-length: 24
+            auto-dns: false
+            auto-gateway: false
+            auto-routes: false
+          ipv6:
+            enabled: false
+
+      dns-resolver:
+        config:
+          server:
+            - 8.8.8.8
+            - 8.8.4.4
+          search:
+            - example.com
+            - cluster.local
+
+      routes:
+        config:
+          - destination: 0.0.0.0/0
+            next-hop-address: 192.168.2.1
+            next-hop-interface: eth1
+            table-id: 254
+
+          - destination: 10.0.0.0/8
+            next-hop-address: 192.168.1.1
+            next-hop-interface: eth0
+            table-id: 254
+
+  # Worker Node 3
+  - hostname: worker-3
+    role: worker
+    rootDeviceHints:
+      deviceName: /dev/sda
+
+    networkConfig:
+      interfaces:
+        - name: eth0
+          type: ethernet
+          state: up
+          mac-address: "52:54:00:00:05:01"
+          ipv4:
+            enabled: true
+            dhcp: false
+            address:
+              - ip: 192.168.1.22
+                prefix-length: 24
+            auto-dns: false
+            auto-gateway: false
+            auto-routes: false
+          ipv6:
+            enabled: false
+
+        - name: eth1
+          type: ethernet
+          state: up
+          mac-address: "52:54:00:00:05:02"
+          ipv4:
+            enabled: true
+            dhcp: false
+            address:
+              - ip: 192.168.2.22
+                prefix-length: 24
+            auto-dns: false
+            auto-gateway: false
+            auto-routes: false
+          ipv6:
+            enabled: false
+
+      dns-resolver:
+        config:
+          server:
+            - 8.8.8.8
+            - 8.8.4.4
+          search:
+            - example.com
+            - cluster.local
+
+      routes:
+        config:
+          - destination: 0.0.0.0/0
+            next-hop-address: 192.168.2.1
+            next-hop-interface: eth1
+            table-id: 254
+
+          - destination: 10.0.0.0/8
+            next-hop-address: 192.168.1.1
+            next-hop-interface: eth0
+            table-id: 254

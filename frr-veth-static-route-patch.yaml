@@ -1,0 +1,27 @@
+apiVersion: frrk8s.metallb.io/v1beta1
+kind: FRRConfiguration
+metadata:
+  name: hub-bgp-peering
+  namespace: openshift-frr-k8s
+  labels:
+    advertise-cudn: 'true'
+spec:
+  nodeSelector: {}
+  bgp:
+    routers:
+      - asn: 64512
+        vrf: bgp-control
+        neighbors:
+          - address: 10.0.14.111  # Router BGP IP
+            asn: 64500
+            port: 179
+            disableMP: true
+            sourceaddress: ens1
+            toReceive:
+              allowed:
+                mode: all
+  # Add raw FRR configuration for static route
+  raw: |
+    vrf bgp-control
+     ip route 192.168.100.0/24 10.255.0.2
+    exit-vrf
