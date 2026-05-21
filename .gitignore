@@ -42,9 +42,10 @@ pull-secret.txt
 temp/
 
 # Debug/troubleshooting playbooks
-# Numbered variants (00, 09a, 11b, 13b, 14b, etc.)
+# Numbered variants (00, 09a, 11b, 13b, 14b, 132a, etc.)
 playbooks/0[0-9]-*.yml
 playbooks/[0-9][0-9][a-z]-*.yml
+playbooks/[0-9][0-9][0-9][a-z]-*.yml
 playbooks/[0-9][0-9][a-z][a-z]-*.yml
 # Numbered 16-19 debug variants (actual 16-19 are committed)
 playbooks/16-add-*.yml
