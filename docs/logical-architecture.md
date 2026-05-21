@@ -64,13 +64,11 @@ flowchart TB
         CoreRouter --> Internet
     end
     
-    HubCluster ~~~ MgdCluster
-    
     HubToR -.BGP Peering.-> CoreRouter
     MgdToR -.BGP Peering.-> CoreRouter
     HubToR -.BGP Peering.-> MgdToR
     
-    HubGit <-.Active/Active HA<br/>Database replication.-> MgdGit
+    HubGit -.Database replication.-> MgdGit
     GitOps -.Syncs from.-> HubGit
     VirtSync -.Watches.-> MgdGit
     ACM -.Manages.-> MgdCP
@@ -502,11 +500,12 @@ graph TB
         
         HubToR[ToR Switch<br/>Cisco Nexus 9000<br/>ASN: 64514<br/>VLAN 10: 10.0.0.0/16]
         
-        HubCP & HubBM --> HubToR
+        HubCP --> HubToR
+        HubBM --> HubToR
         
         HubFRR[FRR-K8s Pods<br/>Running on bare metal<br/>Advertise: 192.168.100.0/24]
         HubBM -.runs.-> HubFRR
-        HubFRR -.BGP Port 179.-> HubToR
+        HubFRR -.BGP.-> HubToR
     end
     
     subgraph "Data Center - Rack 2 (Managed Cluster)"
@@ -517,11 +516,12 @@ graph TB
         
         MgdToR[ToR Switch<br/>Cisco Nexus 9000<br/>ASN: 64517<br/>VLAN 11: 10.1.0.0/16]
         
-        MgdCP & MgdBM --> MgdToR
+        MgdCP --> MgdToR
+        MgdBM --> MgdToR
         
         MgdFRR[FRR-K8s Pods<br/>Running on bare metal<br/>Advertise: 192.168.100.0/24]
         MgdBM -.runs.-> MgdFRR
-        MgdFRR -.BGP Port 179.-> MgdToR
+        MgdFRR -.BGP.-> MgdToR
     end
     
     subgraph "Core Network Infrastructure"
@@ -537,12 +537,13 @@ graph TB
         Windows[Windows Workstation<br/>Testing/Admin]
     end
     
-    HubToR -.eBGP via GRE tunnel.-> Core
-    MgdToR -.eBGP via GRE tunnel.-> Core
+    HubToR -.eBGP.-> Core
+    MgdToR -.eBGP.-> Core
     
-    Core -.Learns 192.168.100.0/24<br/>from BOTH ToR switches.-> Note1[Automatic Failover:<br/>If Rack 1 fails,<br/>Core routes to Rack 2]
+    Bastion --> Core
+    Windows --> Core
     
-    Bastion & Windows --> Core
+    Note1[Automatic Failover:<br/>If Rack 1 fails<br/>Core routes to Rack 2]
     
     style HubBM fill:#f96,stroke:#333,stroke-width:2px
     style MgdBM fill:#f96,stroke:#333,stroke-width:2px
