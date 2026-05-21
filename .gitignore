@@ -41,11 +41,22 @@ pull-secret.txt
 *.bak
 temp/
 
-# Debug/troubleshooting playbooks (numbered 20+)
-playbooks/0[0-9][a-z]-*.yml
+# Debug/troubleshooting playbooks
+# Numbered variants (00, 09a, 11b, 13b, 14b, etc.)
+playbooks/0[0-9]-*.yml
+playbooks/[0-9][0-9][a-z]-*.yml
+playbooks/[0-9][0-9][a-z][a-z]-*.yml
+# Numbered 16-19 debug variants (actual 16-19 are committed)
+playbooks/16-add-*.yml
+playbooks/16-disable-*.yml
+playbooks/17-create-*.yml
+playbooks/18-fix-*.yml
+playbooks/19-check-*.yml
+# Numbered 20-999
 playbooks/[2-9][0-9]-*.yml
 playbooks/[0-9][0-9][0-9]-*.yml
 playbooks/[0-9][0-9][0-9][0-9]-*.yml
+# Named debug/utility playbooks
 playbooks/check-*.yml
 playbooks/debug-*.yml
 playbooks/diagnose-*.yml
@@ -58,8 +69,14 @@ playbooks/quick-*.yml
 playbooks/restart-*.yml
 playbooks/cleanup-*.yml
 playbooks/configure_*.yml
+playbooks/get-*.yml
+playbooks/final-*.yml
 playbooks/files/
 playbooks/archive/
+
+# Debug/experimental role tasks
+roles/bare_metal/tasks/create_bgp_peering_enis.yml
+roles/nmstate/tasks/configure_bgp_peering_interface.yml
 
 # Test scripts
 run-*.sh
