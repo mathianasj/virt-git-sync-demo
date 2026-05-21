@@ -154,8 +154,12 @@ router_availability_zone: us-east-1a
 router_key_name: ocp-bastion-key
 router_user: ec2-user
 
-# Static IP addresses for BGP routers (must be within worker subnets)
-# These IPs are used as default gateway for c5.metal bare metal nodes
+# Static IP addresses for BGP routers
+# Using worker subnet IPs (reverted from BGP peering subnet to original architecture)
+hub_router_bgp_ip: 10.0.11.111
+managed_router_bgp_ip: 10.1.11.224
+
+# Router IPs in worker subnet (active configuration)
 hub_router_ip: 10.0.11.111
 managed_router_ip: 10.1.11.224
 
@@ -169,13 +173,20 @@ ovn_bgp_agent_image: quay.io/openshift/origin-ovn-kubernetes-microshift:latest
 cudn_policy_namespace: cudn-policies
 cudn_network_name: cudn-net
 cudn_vm_namespace: cudn-vms
-cudn_cidr: 192.168.100.0/24
+cudn_cidr: 192.168.100.0/24  # Shared VM network for both clusters (active-active/failover)
 cudn_namespace_label_key: network.kubevirt.io/udn
 cudn_namespace_label_value: kubevirt-l2
 cudn_primary_label_key: k8s.ovn.org/primary-user-defined-network
 cudn_primary_label_value: ""
 cudn_network_label_key: network.type
 cudn_network_label_value: kubevirt-l2
+
+# Transit Gateway BGP Configuration
+# TGW will learn the same CUDN CIDR from both clusters dynamically
+# Allows for active-active or failover scenarios
+tgw_bgp_asn: 64515
+hub_tgw_peer_asn: 64514  # Hub Route Server ASN
+managed_tgw_peer_asn: 64517  # Managed Route Server ASN
 
 # BGP Router Routing Configuration
 # Split routing strategy:

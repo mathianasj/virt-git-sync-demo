@@ -1,0 +1,255 @@
+---
+- name: Deploy Windows Instance in Bastion VPC for Failover Testing
+  hosts: localhost
+  gather_facts: no
+  become: no
+  vars_files:
+    - /tmp/selected-domain.yml
+  vars:
+    windows_instance_type: t3.medium
+    windows_key_name: ocp-bastion-key
+    windows_instance_name: windows-test
+
+  tasks:
+    - name: Load global variables
+      include_vars:
+        file: "{{ playbook_dir }}/../group_vars/all.yml"
+
+    - name: Display Windows instance deployment overview
+      debug:
+        msg:
+          - "=========================================="
+          - "Windows Instance Deployment"
+          - "=========================================="
+          - "Deploying Windows Server 2022 instance"
+          - "Purpose: Failover testing and demonstration"
+          - "VPC: Bastion VPC"
+          - "Instance Type: {{ windows_instance_type }}"
+          - "Expected Runtime: 5-10 minutes"
+          - "=========================================="
+
+    - name: Get bastion VPC ID
+      shell: |
+        aws ec2 describe-vpcs \
+          --region {{ aws_region }} \
+          --filters "Name=tag:Name,Values=bastion-vpc" \
+          --query 'Vpcs[0].VpcId' \
+          --output text
+      register: bastion_vpc_id_result
+      changed_when: false
+
+    - name: Get bastion VPC public subnet
+      shell: |
+        aws ec2 describe-subnets \
+          --region {{ aws_region }} \
+          --filters "Name=vpc-id,Values={{ bastion_vpc_id_result.stdout }}" \
+                    "Name=map-public-ip-on-launch,Values=true" \
+          --query 'Subnets[0].SubnetId' \
+          --output text
+      register: bastion_public_subnet
+
+    - name: Get latest Windows Server 2022 AMI
+      shell: |
+        aws ec2 describe-images \
+          --region {{ aws_region }} \
+          --owners amazon \
+          --filters "Name=name,Values=Windows_Server-2022-English-Full-Base-*" \
+                    "Name=state,Values=available" \
+          --query 'sort_by(Images, &CreationDate)[-1].ImageId' \
+          --output text
+      register: windows_ami
+
+    - name: Create security group for Windows instance
+      shell: |
+        # Check if security group already exists
+        SG_ID=$(aws ec2 describe-security-groups \
+          --region {{ aws_region }} \
+          --filters "Name=group-name,Values=windows-test-sg" \
+                    "Name=vpc-id,Values={{ bastion_vpc_id_result.stdout }}" \
+          --query 'SecurityGroups[0].GroupId' \
+          --output text 2>/dev/null || echo "")
+
+        if [ "$SG_ID" = "" ] || [ "$SG_ID" = "None" ]; then
+          # Create new security group
+          aws ec2 create-security-group \
+            --region {{ aws_region }} \
+            --group-name windows-test-sg \
+            --description "Security group for Windows test instance" \
+            --vpc-id {{ bastion_vpc_id_result.stdout }} \
+            --tag-specifications 'ResourceType=security-group,Tags=[{Key=Name,Value=windows-test-sg}]' \
+            --query 'GroupId' \
+            --output text
+        else
+          echo "$SG_ID"
+        fi
+      register: windows_sg
+
+    - name: Configure security group rules
+      shell: |
+        # Allow RDP from anywhere (you may want to restrict this)
+        aws ec2 authorize-security-group-ingress \
+          --region {{ aws_region }} \
+          --group-id {{ windows_sg.stdout }} \
+          --protocol tcp \
+          --port 3389 \
+          --cidr 0.0.0.0/0 2>/dev/null || echo "RDP rule already exists"
+
+        # Allow ICMP from CUDN network
+        aws ec2 authorize-security-group-ingress \
+          --region {{ aws_region }} \
+          --group-id {{ windows_sg.stdout }} \
+          --protocol icmp \
+          --port -1 \
+          --cidr {{ cudn_cidr }} 2>/dev/null || echo "ICMP rule already exists"
+
+        # Allow all traffic from bastion VPC
+        aws ec2 authorize-security-group-ingress \
+          --region {{ aws_region }} \
+          --group-id {{ windows_sg.stdout }} \
+          --protocol -1 \
+          --cidr {{ bastion_vpc.cidr }} 2>/dev/null || echo "Bastion VPC rule already exists"
+
+        echo "Security group configured"
+      register: sg_rules
+      changed_when: "'configured' in sg_rules.stdout"
+
+    - name: Create Windows user data script
+      copy:
+        content: |
+          <powershell>
+          # Enable ICMP (ping)
+          netsh advfirewall firewall add rule name="ICMP Allow incoming V4 echo request" protocol=icmpv4:8,any dir=in action=allow
+
+          # Set timezone to UTC
+          Set-TimeZone -Id "UTC"
+
+          # Create desktop shortcut for ping test
+          $WshShell = New-Object -comObject WScript.Shell
+          $Shortcut = $WshShell.CreateShortcut("$Home\Desktop\Test CUDN Ping.lnk")
+          $Shortcut.TargetPath = "powershell.exe"
+          $Shortcut.Arguments = "-NoExit -Command `"ping 192.168.100.3 -t`""
+          $Shortcut.IconLocation = "C:\Windows\System32\SHELL32.dll,14"
+          $Shortcut.Save()
+
+          # Install Chrome for web testing
+          $ChromeInstaller = "$env:TEMP\chrome_installer.exe"
+          Invoke-WebRequest -Uri "https://dl.google.com/chrome/install/latest/chrome_installer.exe" -OutFile $ChromeInstaller
+          Start-Process -FilePath $ChromeInstaller -Args "/silent /install" -Wait
+          Remove-Item $ChromeInstaller
+
+          Write-Host "Windows instance configured for failover testing"
+          </powershell>
+        dest: /tmp/windows-userdata.txt
+        mode: '0644'
+
+    - name: Launch Windows instance
+      shell: |
+        # Check if instance already exists
+        INSTANCE_ID=$(aws ec2 describe-instances \
+          --region {{ aws_region }} \
+          --filters "Name=tag:Name,Values={{ windows_instance_name }}" \
+                    "Name=instance-state-name,Values=running,stopped,stopping,pending" \
+          --query 'Reservations[0].Instances[0].InstanceId' \
+          --output text 2>/dev/null || echo "")
+
+        if [ "$INSTANCE_ID" = "" ] || [ "$INSTANCE_ID" = "None" ]; then
+          # Launch new instance
+          aws ec2 run-instances \
+            --region {{ aws_region }} \
+            --image-id {{ windows_ami.stdout }} \
+            --instance-type {{ windows_instance_type }} \
+            --key-name {{ windows_key_name }} \
+            --subnet-id {{ bastion_public_subnet.stdout }} \
+            --security-group-ids {{ windows_sg.stdout }} \
+            --associate-public-ip-address \
+            --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value={{ windows_instance_name }}},{Key=Purpose,Value=failover-testing}]' \
+            --user-data file:///tmp/windows-userdata.txt \
+            --query 'Instances[0].InstanceId' \
+            --output text
+        else
+          echo "$INSTANCE_ID"
+        fi
+      register: windows_instance
+
+    - name: Wait for Windows instance to be running
+      shell: |
+        aws ec2 wait instance-running \
+          --region {{ aws_region }} \
+          --instance-ids {{ windows_instance.stdout }}
+        echo "running"
+      register: instance_wait
+      changed_when: false
+
+    - name: Get Windows instance public IP
+      shell: |
+        aws ec2 describe-instances \
+          --region {{ aws_region }} \
+          --instance-ids {{ windows_instance.stdout }} \
+          --query 'Reservations[0].Instances[0].PublicIpAddress' \
+          --output text
+      register: windows_public_ip
+      changed_when: false
+
+    - name: Get Windows instance private IP
+      shell: |
+        aws ec2 describe-instances \
+          --region {{ aws_region }} \
+          --instance-ids {{ windows_instance.stdout }} \
+          --query 'Reservations[0].Instances[0].PrivateIpAddress' \
+          --output text
+      register: windows_private_ip
+      changed_when: false
+
+    - name: Get Windows Administrator password
+      shell: |
+        # Wait for password to be available (can take up to 10 minutes)
+        for i in {1..60}; do
+          PASSWORD=$(aws ec2 get-password-data \
+            --region {{ aws_region }} \
+            --instance-id {{ windows_instance.stdout }} \
+            --priv-launch-key ~/.ssh/{{ windows_key_name }} \
+            --query 'PasswordData' \
+            --output text 2>/dev/null || echo "")
+
+          if [ "$PASSWORD" != "" ]; then
+            echo "$PASSWORD"
+            exit 0
+          fi
+
+          if [ $i -eq 1 ]; then
+            echo "Waiting for Windows password to be available (this can take 5-10 minutes)..."
+          fi
+
+          sleep 10
+        done
+        echo "TIMEOUT - Password not available yet. Run the following command manually:"
+        echo "aws ec2 get-password-data --region {{ aws_region }} --instance-id {{ windows_instance.stdout }} --priv-launch-key ~/.ssh/{{ windows_key_name }} --query 'PasswordData' --output text"
+      register: windows_password
+      changed_when: false
+
+    - name: Display Windows instance information
+      debug:
+        msg:
+          - "=========================================="
+          - "Windows Instance Deployed Successfully"
+          - "=========================================="
+          - "Instance ID: {{ windows_instance.stdout }}"
+          - "Public IP: {{ windows_public_ip.stdout }}"
+          - "Private IP: {{ windows_private_ip.stdout }}"
+          - ""
+          - "RDP Connection:"
+          - "  Address: {{ windows_public_ip.stdout }}"
+          - "  Username: Administrator"
+          - "  Password: {{ windows_password.stdout }}"
+          - ""
+          - "Failover Testing:"
+          - "  1. Connect via RDP to the Windows instance"
+          - "  2. Use desktop shortcut 'Test CUDN Ping' to ping 192.168.100.3"
+          - "  3. Or open Chrome and browse to http://192.168.100.3"
+          - "  4. Observe traffic during cluster failover scenarios"
+          - ""
+          - "Network Configuration:"
+          - "  - Has route to {{ cudn_cidr }} via Transit Gateway"
+          - "  - Can reach VMs in both hub and managed clusters"
+          - "  - Traffic will automatically failover based on BGP"
+          - "=========================================="

@@ -1,0 +1,354 @@
+---
+- name: VPC Route Server Setup
+  hosts: localhost
+  gather_facts: no
+  become: no
+  vars_files:
+    - /tmp/selected-domain.yml
+  vars:
+    hub_route_server_asn: 64514
+    managed_route_server_asn: 64517
+    bastion_route_server_asn: 64516
+
+  tasks:
+    - name: Load global variables
+      include_vars:
+        file: "{{ playbook_dir }}/../group_vars/all.yml"
+
+    - name: Get VPC IDs
+      shell: |
+        aws ec2 describe-vpcs \
+          --region {{ aws_region }} \
+          --filters "Name=tag:Name,Values={{ item }}" \
+          --query 'Vpcs[0].VpcId' \
+          --output text
+      loop:
+        - hub-cluster-vpc
+        - managed-cluster-vpc
+        - bastion-vpc
+      register: vpc_ids
+
+    - name: Set VPC ID facts
+      set_fact:
+        hub_vpc_id: "{{ vpc_ids.results[0].stdout }}"
+        managed_vpc_id: "{{ vpc_ids.results[1].stdout }}"
+        bastion_vpc_id: "{{ vpc_ids.results[2].stdout }}"
+
+    - name: Create Route Server for hub VPC
+      shell: |
+        aws ec2 create-route-server \
+          --region {{ aws_region }} \
+          --amazon-side-asn {{ hub_route_server_asn }} \
+          --tag-specifications 'ResourceType=route-server,Tags=[{Key=Name,Value=hub-vpc-route-server},{Key=Cluster,Value=hub}]' \
+          --query 'RouteServer.RouteServerId' \
+          --output text
+      register: hub_rs_result
+      changed_when: true
+
+    - name: Create Route Server for managed VPC
+      shell: |
+        aws ec2 create-route-server \
+          --region {{ aws_region }} \
+          --amazon-side-asn {{ managed_route_server_asn }} \
+          --tag-specifications 'ResourceType=route-server,Tags=[{Key=Name,Value=managed-vpc-route-server},{Key=Cluster,Value=managed}]' \
+          --query 'RouteServer.RouteServerId' \
+          --output text
+      register: managed_rs_result
+      changed_when: true
+
+    - name: Create Route Server for bastion VPC
+      shell: |
+        aws ec2 create-route-server \
+          --region {{ aws_region }} \
+          --amazon-side-asn {{ bastion_route_server_asn }} \
+          --tag-specifications 'ResourceType=route-server,Tags=[{Key=Name,Value=bastion-vpc-route-server}]' \
+          --query 'RouteServer.RouteServerId' \
+          --output text
+      register: bastion_rs_result
+      changed_when: true
+
+    - name: Set Route Server ID facts
+      set_fact:
+        hub_route_server_id: "{{ hub_rs_result.stdout }}"
+        managed_route_server_id: "{{ managed_rs_result.stdout }}"
+        bastion_route_server_id: "{{ bastion_rs_result.stdout }}"
+
+    - name: Wait for Route Servers to become available
+      shell: |
+        for i in {1..12}; do
+          STATE=$(aws ec2 describe-route-servers \
+            --region {{ aws_region }} \
+            --route-server-ids {{ item }} \
+            --query 'RouteServers[0].State' \
+            --output text)
+          if [ "$STATE" = "available" ]; then
+            echo "available"
+            exit 0
+          fi
+          sleep 5
+        done
+        echo "timeout"
+        exit 1
+      loop:
+        - "{{ hub_route_server_id }}"
+        - "{{ managed_route_server_id }}"
+        - "{{ bastion_route_server_id }}"
+      register: rs_wait
+      changed_when: false
+
+    - name: Associate hub Route Server with hub VPC
+      shell: |
+        aws ec2 associate-route-server \
+          --region {{ aws_region }} \
+          --route-server-id {{ hub_route_server_id }} \
+          --vpc-id {{ hub_vpc_id }}
+      register: hub_rs_assoc
+      changed_when: true
+
+    - name: Associate managed Route Server with managed VPC
+      shell: |
+        aws ec2 associate-route-server \
+          --region {{ aws_region }} \
+          --route-server-id {{ managed_route_server_id }} \
+          --vpc-id {{ managed_vpc_id }}
+      register: managed_rs_assoc
+      changed_when: true
+
+    - name: Associate bastion Route Server with bastion VPC
+      shell: |
+        aws ec2 associate-route-server \
+          --region {{ aws_region }} \
+          --route-server-id {{ bastion_route_server_id }} \
+          --vpc-id {{ bastion_vpc_id }}
+      register: bastion_rs_assoc
+      changed_when: true
+
+    - name: Wait for Route Server associations
+      shell: |
+        for i in {1..12}; do
+          STATE=$(aws ec2 get-route-server-associations \
+            --region {{ aws_region }} \
+            --route-server-id {{ item }} \
+            --query 'RouteServerAssociations[0].State' \
+            --output text)
+          if [ "$STATE" = "associated" ]; then
+            echo "associated"
+            exit 0
+          fi
+          sleep 5
+        done
+        echo "timeout"
+        exit 1
+      loop:
+        - "{{ hub_route_server_id }}"
+        - "{{ managed_route_server_id }}"
+        - "{{ bastion_route_server_id }}"
+      register: rs_assoc_wait
+      changed_when: false
+
+    - name: Get hub VPC worker subnet ID (us-east-1a)
+      shell: |
+        aws ec2 describe-subnets \
+          --region {{ aws_region }} \
+          --filters "Name=vpc-id,Values={{ hub_vpc_id }}" \
+                    "Name=availability-zone,Values=us-east-1a" \
+                    "Name=map-public-ip-on-launch,Values=false" \
+          --query 'Subnets[0].SubnetId' \
+          --output text
+      register: hub_subnet
+
+    - name: Get managed VPC worker subnet ID (us-east-1a)
+      shell: |
+        aws ec2 describe-subnets \
+          --region {{ aws_region }} \
+          --filters "Name=vpc-id,Values={{ managed_vpc_id }}" \
+                    "Name=availability-zone,Values=us-east-1a" \
+                    "Name=map-public-ip-on-launch,Values=false" \
+          --query 'Subnets[0].SubnetId' \
+          --output text
+      register: managed_subnet
+
+    - name: Get bastion VPC subnet ID
+      shell: |
+        aws ec2 describe-subnets \
+          --region {{ aws_region }} \
+          --filters "Name=vpc-id,Values={{ bastion_vpc_id }}" \
+          --query 'Subnets[0].SubnetId' \
+          --output text
+      register: bastion_subnet
+
+    - name: Create Route Server endpoint in hub VPC
+      shell: |
+        aws ec2 create-route-server-endpoint \
+          --region {{ aws_region }} \
+          --route-server-id {{ hub_route_server_id }} \
+          --subnet-id {{ hub_subnet.stdout }} \
+          --tag-specifications 'ResourceType=route-server-endpoint,Tags=[{Key=Name,Value=hub-route-server-endpoint}]' \
+          --query 'RouteServerEndpoint.RouteServerEndpointId' \
+          --output text
+      register: hub_endpoint
+      changed_when: true
+
+    - name: Create Route Server endpoint in managed VPC
+      shell: |
+        aws ec2 create-route-server-endpoint \
+          --region {{ aws_region }} \
+          --route-server-id {{ managed_route_server_id }} \
+          --subnet-id {{ managed_subnet.stdout }} \
+          --tag-specifications 'ResourceType=route-server-endpoint,Tags=[{Key=Name,Value=managed-route-server-endpoint}]' \
+          --query 'RouteServerEndpoint.RouteServerEndpointId' \
+          --output text
+      register: managed_endpoint
+      changed_when: true
+
+    - name: Create Route Server endpoint in bastion VPC
+      shell: |
+        aws ec2 create-route-server-endpoint \
+          --region {{ aws_region }} \
+          --route-server-id {{ bastion_route_server_id }} \
+          --subnet-id {{ bastion_subnet.stdout }} \
+          --tag-specifications 'ResourceType=route-server-endpoint,Tags=[{Key=Name,Value=bastion-route-server-endpoint}]' \
+          --query 'RouteServerEndpoint.RouteServerEndpointId' \
+          --output text
+      register: bastion_endpoint
+      changed_when: true
+
+    - name: Wait for Route Server endpoints and get IPs
+      shell: |
+        for i in {1..20}; do
+          RESULT=$(aws ec2 describe-route-server-endpoints \
+            --region {{ aws_region }} \
+            --route-server-endpoint-ids {{ item }} \
+            --query 'RouteServerEndpoints[0].[State,EniAddress]' \
+            --output text)
+          STATE=$(echo "$RESULT" | awk '{print $1}')
+          IP=$(echo "$RESULT" | awk '{print $2}')
+          if [ "$STATE" = "available" ] && [ "$IP" != "None" ]; then
+            echo "$IP"
+            exit 0
+          fi
+          sleep 5
+        done
+        echo "timeout"
+        exit 1
+      loop:
+        - "{{ hub_endpoint.stdout }}"
+        - "{{ managed_endpoint.stdout }}"
+        - "{{ bastion_endpoint.stdout }}"
+      register: endpoint_ips
+      changed_when: false
+
+    - name: Set Route Server endpoint IP facts
+      set_fact:
+        hub_route_server_ip: "{{ endpoint_ips.results[0].stdout }}"
+        managed_route_server_ip: "{{ endpoint_ips.results[1].stdout }}"
+        bastion_route_server_ip: "{{ endpoint_ips.results[2].stdout }}"
+
+    - name: Get hub VPC route table ID
+      shell: |
+        aws ec2 describe-route-tables \
+          --region {{ aws_region }} \
+          --filters "Name=association.subnet-id,Values={{ hub_subnet.stdout }}" \
+          --query 'RouteTables[0].RouteTableId' \
+          --output text
+      register: hub_rtb
+      changed_when: false
+
+    - name: Get managed VPC route table ID
+      shell: |
+        aws ec2 describe-route-tables \
+          --region {{ aws_region }} \
+          --filters "Name=association.subnet-id,Values={{ managed_subnet.stdout }}" \
+          --query 'RouteTables[0].RouteTableId' \
+          --output text
+      register: managed_rtb
+      changed_when: false
+
+    - name: Get bastion VPC route table ID
+      shell: |
+        aws ec2 describe-route-tables \
+          --region {{ aws_region }} \
+          --filters "Name=vpc-id,Values={{ bastion_vpc_id }}" \
+          --query 'RouteTables[0].RouteTableId' \
+          --output text
+      register: bastion_rtb
+      changed_when: false
+
+    - name: Enable Route Server propagation for hub VPC
+      shell: |
+        aws ec2 enable-route-server-propagation \
+          --region {{ aws_region }} \
+          --route-server-id {{ hub_route_server_id }} \
+          --route-table-id {{ hub_rtb.stdout }}
+      register: hub_propagation
+      changed_when: true
+      failed_when:
+        - hub_propagation.rc != 0
+        - "'RouteTableAlreadyPropagated' not in hub_propagation.stderr"
+
+    - name: Enable Route Server propagation for managed VPC
+      shell: |
+        aws ec2 enable-route-server-propagation \
+          --region {{ aws_region }} \
+          --route-server-id {{ managed_route_server_id }} \
+          --route-table-id {{ managed_rtb.stdout }}
+      register: managed_propagation
+      changed_when: true
+      failed_when:
+        - managed_propagation.rc != 0
+        - "'RouteTableAlreadyPropagated' not in managed_propagation.stderr"
+
+    - name: Enable Route Server propagation for bastion VPC
+      shell: |
+        aws ec2 enable-route-server-propagation \
+          --region {{ aws_region }} \
+          --route-server-id {{ bastion_route_server_id }} \
+          --route-table-id {{ bastion_rtb.stdout }}
+      register: bastion_propagation
+      changed_when: true
+      failed_when:
+        - bastion_propagation.rc != 0
+        - "'RouteTableAlreadyPropagated' not in bastion_propagation.stderr"
+
+    - name: Save Route Server info to file
+      copy:
+        content: |
+          ---
+          hub_route_server_id: {{ hub_route_server_id }}
+          hub_route_server_ip: {{ hub_route_server_ip }}
+          hub_route_server_asn: {{ hub_route_server_asn }}
+          hub_route_server_endpoint_id: {{ hub_endpoint.stdout }}
+          managed_route_server_id: {{ managed_route_server_id }}
+          managed_route_server_ip: {{ managed_route_server_ip }}
+          managed_route_server_asn: {{ managed_route_server_asn }}
+          managed_route_server_endpoint_id: {{ managed_endpoint.stdout }}
+          bastion_route_server_id: {{ bastion_route_server_id }}
+          bastion_route_server_ip: {{ bastion_route_server_ip }}
+          bastion_route_server_asn: {{ bastion_route_server_asn }}
+          bastion_route_server_endpoint_id: {{ bastion_endpoint.stdout }}
+        dest: /tmp/route-server-info.yml
+        mode: '0644'
+
+    - name: Display Route Server setup summary
+      debug:
+        msg:
+          - "=========================================="
+          - "Route Server Setup Complete"
+          - "=========================================="
+          - "Hub VPC Route Server:"
+          - "  ID: {{ hub_route_server_id }}"
+          - "  ASN: {{ hub_route_server_asn }}"
+          - "  Endpoint IP: {{ hub_route_server_ip }}"
+          - ""
+          - "Managed VPC Route Server:"
+          - "  ID: {{ managed_route_server_id }}"
+          - "  ASN: {{ managed_route_server_asn }}"
+          - "  Endpoint IP: {{ managed_route_server_ip }}"
+          - ""
+          - "Bastion VPC Route Server:"
+          - "  ID: {{ bastion_route_server_id }}"
+          - "  ASN: {{ bastion_route_server_asn }}"
+          - "  Endpoint IP: {{ bastion_route_server_ip }}"
+          - ""
+          - "Route propagation enabled for all VPCs"
+          - "=========================================="

@@ -1,0 +1,602 @@
+---
+- name: Configure Transit Gateway Connect and BGP
+  hosts: localhost
+  gather_facts: no
+  become: no
+  vars_files:
+    - /tmp/selected-domain.yml
+    - /tmp/route-server-info.yml
+    - /tmp/transit-gateway-info.yml
+
+  tasks:
+    - name: Load global variables
+      include_vars:
+        file: "{{ playbook_dir }}/../group_vars/all.yml"
+
+    - name: Create Transit Gateway Connect attachment for hub VPC
+      shell: |
+        aws ec2 create-transit-gateway-connect \
+          --region {{ aws_region }} \
+          --transit-gateway-id {{ transit_gateway_id }} \
+          --transport-transit-gateway-attachment-id {{ hub_tgw_attachment_id }} \
+          --options "Protocol=gre" \
+          --tag-specifications 'ResourceType=transit-gateway-attachment,Tags=[{Key=Name,Value=hub-tgw-connect}]' \
+          --query 'TransitGatewayConnect.TransitGatewayAttachmentId' \
+          --output text
+      register: hub_connect_result
+      changed_when: true
+
+    - name: Create Transit Gateway Connect attachment for managed VPC
+      shell: |
+        aws ec2 create-transit-gateway-connect \
+          --region {{ aws_region }} \
+          --transit-gateway-id {{ transit_gateway_id }} \
+          --transport-transit-gateway-attachment-id {{ managed_tgw_attachment_id }} \
+          --options "Protocol=gre" \
+          --tag-specifications 'ResourceType=transit-gateway-attachment,Tags=[{Key=Name,Value=managed-tgw-connect}]' \
+          --query 'TransitGatewayConnect.TransitGatewayAttachmentId' \
+          --output text
+      register: managed_connect_result
+      changed_when: true
+
+    - name: Wait for Connect attachments to become available
+      shell: |
+        for i in {1..30}; do
+          STATES=$(aws ec2 describe-transit-gateway-attachments \
+            --region {{ aws_region }} \
+            --transit-gateway-attachment-ids {{ hub_connect_result.stdout }} {{ managed_connect_result.stdout }} \
+            --query 'TransitGatewayAttachments[].State' \
+            --output text)
+          if ! echo "$STATES" | grep -q "pending"; then
+            echo "available"
+            exit 0
+          fi
+          sleep 10
+        done
+        echo "timeout"
+        exit 1
+      register: connect_wait
+      changed_when: false
+
+    - name: Create Transit Gateway Connect peer for hub Route Server
+      shell: |
+        aws ec2 create-transit-gateway-connect-peer \
+          --region {{ aws_region }} \
+          --transit-gateway-attachment-id {{ hub_connect_result.stdout }} \
+          --peer-address {{ hub_route_server_ip }} \
+          --inside-cidr-blocks "169.254.100.0/29" \
+          --bgp-options "PeerAsn={{ hub_route_server_asn }}" \
+          --tag-specifications 'ResourceType=transit-gateway-connect-peer,Tags=[{Key=Name,Value=hub-rs-peer}]' \
+          --query 'TransitGatewayConnectPeer.TransitGatewayConnectPeerId' \
+          --output text
+      register: hub_connect_peer
+      changed_when: true
+
+    - name: Create Transit Gateway Connect peer for managed Route Server
+      shell: |
+        aws ec2 create-transit-gateway-connect-peer \
+          --region {{ aws_region }} \
+          --transit-gateway-attachment-id {{ managed_connect_result.stdout }} \
+          --peer-address {{ managed_route_server_ip }} \
+          --inside-cidr-blocks "169.254.101.0/29" \
+          --bgp-options "PeerAsn={{ managed_route_server_asn }}" \
+          --tag-specifications 'ResourceType=transit-gateway-connect-peer,Tags=[{Key=Name,Value=managed-rs-peer}]' \
+          --query 'TransitGatewayConnectPeer.TransitGatewayConnectPeerId' \
+          --output text
+      register: managed_connect_peer
+      changed_when: true
+
+    - name: Wait for Connect peers to establish BGP
+      shell: |
+        for i in {1..60}; do
+          STATES=$(aws ec2 describe-transit-gateway-connect-peers \
+            --region {{ aws_region }} \
+            --transit-gateway-connect-peer-ids {{ hub_connect_peer.stdout }} {{ managed_connect_peer.stdout }} \
+            --query 'TransitGatewayConnectPeers[].State' \
+            --output text)
+          if ! echo "$STATES" | grep -qE "pending|creating"; then
+            echo "available"
+            exit 0
+          fi
+          sleep 10
+        done
+        echo "timeout"
+        exit 1
+      register: peer_wait
+      changed_when: false
+
+    - name: Display TGW Connect setup summary
+      debug:
+        msg:
+          - "=========================================="
+          - "Transit Gateway Connect BGP Configured"
+          - "=========================================="
+          - "Hub Connect Peer: {{ hub_connect_peer.stdout }}"
+          - "  Peering with: {{ hub_route_server_ip }} (ASN {{ hub_route_server_asn }})"
+          - ""
+          - "Managed Connect Peer: {{ managed_connect_peer.stdout }}"
+          - "  Peering with: {{ managed_route_server_ip }} (ASN {{ managed_route_server_asn }})"
+          - ""
+          - "TGW will now learn {{ cudn_cidr }} dynamically from both clusters"
+          - "=========================================="
+
+- name: Configure Worker BGP Peering with VPC Route Server
+  hosts: localhost
+  gather_facts: no
+  become: no
+  vars_files:
+    - /tmp/selected-domain.yml
+    - /tmp/route-server-info.yml
+
+  tasks:
+    - name: Load global variables
+      include_vars:
+        file: "{{ playbook_dir }}/../group_vars/all.yml"
+
+    - name: Update clusters configuration
+      set_fact:
+        clusters: |
+          {% set updated_clusters = [] %}
+          {% for cluster in clusters %}
+          {% set _ = cluster.update({'base_domain': selected_base_domain}) %}
+          {% set _ = updated_clusters.append(cluster) %}
+          {% endfor %}
+          {{ updated_clusters }}
+
+    - name: Get bastion public IP
+      shell: |
+        aws ec2 describe-instances \
+          --region {{ aws_region }} \
+          --filters "Name=tag:Role,Values=bastion" "Name=instance-state-name,Values=running" \
+          --query 'Reservations[0].Instances[0].PublicIpAddress' \
+          --output text
+      register: bastion_ip_result
+      changed_when: false
+
+    - name: Add bastion to inventory
+      add_host:
+        name: bastion_host
+        groups: bastion_dynamic
+        ansible_host: "{{ bastion_ip_result.stdout }}"
+        ansible_user: "{{ bastion_user }}"
+        ansible_ssh_private_key_file: "~/.ssh/{{ bastion_key_name }}"
+        ansible_ssh_common_args: "-o StrictHostKeyChecking=no"
+        ansible_python_interpreter: /usr/bin/python3
+
+- name: Configure BGP on Hub Cluster
+  hosts: bastion_dynamic
+  gather_facts: no
+  become: no
+  vars_files:
+    - /tmp/selected-domain.yml
+    - /tmp/route-server-info.yml
+
+  tasks:
+    - name: Load global variables
+      include_vars:
+        file: "{{ playbook_dir }}/../group_vars/all.yml"
+
+    - name: Update clusters configuration
+      set_fact:
+        clusters: |
+          {% set updated_clusters = [] %}
+          {% for cluster in clusters %}
+          {% set _ = cluster.update({'base_domain': selected_base_domain}) %}
+          {% set _ = updated_clusters.append(cluster) %}
+          {% endfor %}
+          {{ updated_clusters }}
+
+    - name: Create Route Server BGP peers for bare metal workers
+      shell: |
+        export KUBECONFIG="{{ clusters[0].install_dir }}/auth/kubeconfig"
+
+        # Get bare metal worker IPs
+        WORKER_IPS=$(oc get nodes -l node.openshift.io/instance-type=metal \
+          -o jsonpath='{.items[*].status.addresses[?(@.type=="InternalIP")].address}')
+
+        # Create BGP peers for each worker
+        for WORKER_IP in $WORKER_IPS; do
+          # Check if peer already exists
+          PEER_EXISTS=$(aws ec2 describe-route-server-peers \
+            --region {{ aws_region }} \
+            --filters "Name=peer-address,Values=$WORKER_IP" \
+                      "Name=route-server-id,Values={{ hub_route_server_id }}" \
+            --query 'RouteServerPeers[0].RouteServerPeerId' \
+            --output text 2>/dev/null || echo "")
+
+          if [ "$PEER_EXISTS" = "" ] || [ "$PEER_EXISTS" = "None" ]; then
+            echo "Creating BGP peer for $WORKER_IP..."
+            aws ec2 create-route-server-peer \
+              --region {{ aws_region }} \
+              --route-server-endpoint-id {{ hub_route_server_endpoint_id }} \
+              --peer-address $WORKER_IP \
+              --bgp-options 'PeerAsn={{ bgp_asn_hub }}' \
+              --tag-specifications "ResourceType=route-server-peer,Tags=[{Key=Name,Value=worker-${WORKER_IP}-peer}]" \
+              --output text
+          else
+            echo "BGP peer for $WORKER_IP already exists: $PEER_EXISTS"
+          fi
+        done
+      environment:
+        KUBECONFIG: "{{ clusters[0].install_dir }}/auth/kubeconfig"
+      register: create_peers
+      changed_when: "'Creating BGP peer' in create_peers.stdout"
+
+    - name: Display peer creation output
+      debug:
+        var: create_peers.stdout_lines
+
+    - name: Update hub-bgp-peering FRRConfiguration to add Route Server neighbor
+      shell: |
+        export KUBECONFIG="{{ clusters[0].install_dir }}/auth/kubeconfig"
+
+        # Check if Route Server neighbor already exists
+        NEIGHBOR_EXISTS=$(oc get frrconfiguration hub-bgp-peering -n openshift-frr-k8s \
+          -o jsonpath='{.spec.bgp.routers[0].neighbors[?(@.address=="{{ hub_route_server_ip }}")].address}' || echo "")
+
+        if [ "$NEIGHBOR_EXISTS" = "" ]; then
+          echo "Adding Route Server neighbor to hub-bgp-peering..."
+          oc patch frrconfiguration hub-bgp-peering -n openshift-frr-k8s --type=json -p='[
+            {
+              "op": "add",
+              "path": "/spec/bgp/routers/0/neighbors/-",
+              "value": {
+                "address": "{{ hub_route_server_ip }}",
+                "asn": {{ hub_route_server_asn }},
+                "disableMP": true,
+                "dualStackAddressFamily": false,
+                "port": 179,
+                "toReceive": {
+                  "allowed": {
+                    "mode": "all"
+                  }
+                }
+              }
+            }
+          ]'
+        else
+          echo "Route Server neighbor already configured in hub-bgp-peering"
+        fi
+      environment:
+        KUBECONFIG: "{{ clusters[0].install_dir }}/auth/kubeconfig"
+      register: patch_base_config
+      changed_when: "'Adding Route Server neighbor' in patch_base_config.stdout"
+
+    - name: Get FRRConfigurations for bare metal workers
+      shell: |
+        export KUBECONFIG="{{ clusters[0].install_dir }}/auth/kubeconfig"
+        oc get frrconfiguration -n openshift-frr-k8s \
+          -l k8s.ovn.org/route-advertisements=cudn-advertisement \
+          -o json | jq -r '.items[] | select(.spec.nodeSelector.matchLabels."kubernetes.io/hostname" | contains("metal")) | .metadata.name'
+      environment:
+        KUBECONFIG: "{{ clusters[0].install_dir }}/auth/kubeconfig"
+      register: metal_frr_configs
+      changed_when: false
+
+    - name: Add Route Server neighbor to bare metal worker FRRConfigurations
+      shell: |
+        export KUBECONFIG="{{ clusters[0].install_dir }}/auth/kubeconfig"
+
+        # Check if Route Server neighbor already exists
+        NEIGHBOR_EXISTS=$(oc get frrconfiguration {{ item }} -n openshift-frr-k8s \
+          -o jsonpath='{.spec.bgp.routers[0].neighbors[?(@.address=="{{ hub_route_server_ip }}")].address}' || echo "")
+
+        if [ "$NEIGHBOR_EXISTS" = "" ]; then
+          echo "Adding Route Server neighbor to {{ item }}..."
+          oc patch frrconfiguration {{ item }} -n openshift-frr-k8s --type=json -p='[
+            {
+              "op": "add",
+              "path": "/spec/bgp/routers/0/neighbors/-",
+              "value": {
+                "address": "{{ hub_route_server_ip }}",
+                "asn": {{ hub_route_server_asn }},
+                "disableMP": true,
+                "dualStackAddressFamily": false,
+                "port": 179,
+                "toAdvertise": {
+                  "allowed": {
+                    "mode": "filtered",
+                    "prefixes": ["{{ cudn_cidr }}"]
+                  }
+                },
+                "toReceive": {
+                  "allowed": {
+                    "mode": "all"
+                  }
+                }
+              }
+            }
+          ]'
+        else
+          echo "Route Server neighbor already configured in {{ item }}"
+        fi
+      environment:
+        KUBECONFIG: "{{ clusters[0].install_dir }}/auth/kubeconfig"
+      loop: "{{ metal_frr_configs.stdout_lines }}"
+      register: patch_worker_configs
+      changed_when: "'Adding Route Server neighbor' in patch_worker_configs.stdout"
+      when: metal_frr_configs.stdout_lines | length > 0
+
+    - name: Wait for BGP sessions to establish
+      pause:
+        seconds: 30
+        prompt: "Waiting for BGP sessions to establish..."
+
+    - name: Verify BGP sessions on workers
+      shell: |
+        export KUBECONFIG="{{ clusters[0].install_dir }}/auth/kubeconfig"
+
+        echo "=== BGP Session Status ==="
+        for POD in $(oc get pods -n openshift-frr-k8s -l app.kubernetes.io/name=frr-k8s -o name | head -2); do
+          NODE=$(oc get $POD -n openshift-frr-k8s -o jsonpath='{.spec.nodeName}')
+          echo ""
+          echo "Node: $NODE"
+          oc exec -n openshift-frr-k8s $POD -c frr -- vtysh -c "show bgp summary" | grep -E "Neighbor|{{ hub_route_server_ip }}" || true
+        done
+      environment:
+        KUBECONFIG: "{{ clusters[0].install_dir }}/auth/kubeconfig"
+      register: bgp_status
+      changed_when: false
+
+    - name: Display BGP session status
+      debug:
+        var: bgp_status.stdout_lines
+
+    - name: Check hub Route Server routing database
+      shell: |
+        aws ec2 get-route-server-routing-database \
+          --region {{ aws_region }} \
+          --route-server-id {{ hub_route_server_id }} \
+          --output json | jq -r '.Routes[] | select(.Prefix=="{{ cudn_cidr }}") |
+            "Route: \(.Prefix) via \(.NextHopIp) - Status: \(.RouteStatus)"'
+      register: hub_rs_routes
+      changed_when: false
+      delegate_to: localhost
+
+    - name: Display hub Route Server routes
+      debug:
+        msg:
+          - "=========================================="
+          - "Hub Route Server BGP Configuration Complete"
+          - "=========================================="
+          - "{{ hub_rs_routes.stdout_lines }}"
+          - ""
+          - "Hub workers are now peering with Route Server"
+          - "Route Server IP: {{ hub_route_server_ip }}"
+          - "Route Server ASN: {{ hub_route_server_asn }}"
+          - "=========================================="
+
+- name: Configure BGP on Managed Cluster
+  hosts: bastion_dynamic
+  gather_facts: no
+  become: no
+  vars_files:
+    - /tmp/selected-domain.yml
+    - /tmp/route-server-info.yml
+    - /tmp/transit-gateway-info.yml
+
+  tasks:
+    - name: Load global variables
+      include_vars:
+        file: "{{ playbook_dir }}/../group_vars/all.yml"
+
+    - name: Update clusters configuration
+      set_fact:
+        clusters: |
+          {% set updated_clusters = [] %}
+          {% for cluster in clusters %}
+          {% set _ = cluster.update({'base_domain': selected_base_domain}) %}
+          {% set _ = updated_clusters.append(cluster) %}
+          {% endfor %}
+          {{ updated_clusters }}
+
+    - name: Create Route Server BGP peers for bare metal workers in managed cluster
+      shell: |
+        export KUBECONFIG="{{ clusters[1].install_dir }}/auth/kubeconfig"
+
+        # Get bare metal worker IPs
+        WORKER_IPS=$(oc get nodes -l node.openshift.io/instance-type=metal \
+          -o jsonpath='{.items[*].status.addresses[?(@.type=="InternalIP")].address}')
+
+        # Create BGP peers for each worker
+        for WORKER_IP in $WORKER_IPS; do
+          # Check if peer already exists
+          PEER_EXISTS=$(aws ec2 describe-route-server-peers \
+            --region {{ aws_region }} \
+            --filters "Name=peer-address,Values=$WORKER_IP" \
+                      "Name=route-server-id,Values={{ managed_route_server_id }}" \
+            --query 'RouteServerPeers[0].RouteServerPeerId' \
+            --output text 2>/dev/null || echo "")
+
+          if [ "$PEER_EXISTS" = "" ] || [ "$PEER_EXISTS" = "None" ]; then
+            echo "Creating BGP peer for $WORKER_IP..."
+            aws ec2 create-route-server-peer \
+              --region {{ aws_region }} \
+              --route-server-endpoint-id {{ managed_route_server_endpoint_id }} \
+              --peer-address $WORKER_IP \
+              --bgp-options 'PeerAsn={{ bgp_asn_managed }}' \
+              --tag-specifications "ResourceType=route-server-peer,Tags=[{Key=Name,Value=worker-${WORKER_IP}-peer}]" \
+              --output text
+          else
+            echo "BGP peer for $WORKER_IP already exists: $PEER_EXISTS"
+          fi
+        done
+      environment:
+        KUBECONFIG: "{{ clusters[1].install_dir }}/auth/kubeconfig"
+      register: create_managed_peers
+      changed_when: "'Creating BGP peer' in create_managed_peers.stdout"
+
+    - name: Display managed peer creation output
+      debug:
+        var: create_managed_peers.stdout_lines
+
+    - name: Update managed-bgp-peering FRRConfiguration to add Route Server neighbor
+      shell: |
+        export KUBECONFIG="{{ clusters[1].install_dir }}/auth/kubeconfig"
+
+        # Check if Route Server neighbor already exists
+        NEIGHBOR_EXISTS=$(oc get frrconfiguration managed-bgp-peering -n openshift-frr-k8s \
+          -o jsonpath='{.spec.bgp.routers[0].neighbors[?(@.address=="{{ managed_route_server_ip }}")].address}' || echo "")
+
+        if [ "$NEIGHBOR_EXISTS" = "" ]; then
+          echo "Adding Route Server neighbor to managed-bgp-peering..."
+          oc patch frrconfiguration managed-bgp-peering -n openshift-frr-k8s --type=json -p='[
+            {
+              "op": "add",
+              "path": "/spec/bgp/routers/0/neighbors/-",
+              "value": {
+                "address": "{{ managed_route_server_ip }}",
+                "asn": {{ managed_route_server_asn }},
+                "disableMP": true,
+                "dualStackAddressFamily": false,
+                "port": 179,
+                "toReceive": {
+                  "allowed": {
+                    "mode": "all"
+                  }
+                }
+              }
+            }
+          ]'
+        else
+          echo "Route Server neighbor already configured in managed-bgp-peering"
+        fi
+      environment:
+        KUBECONFIG: "{{ clusters[1].install_dir }}/auth/kubeconfig"
+      register: patch_managed_base_config
+      changed_when: "'Adding Route Server neighbor' in patch_managed_base_config.stdout"
+
+    - name: Get FRRConfigurations for bare metal workers in managed cluster
+      shell: |
+        export KUBECONFIG="{{ clusters[1].install_dir }}/auth/kubeconfig"
+        oc get frrconfiguration -n openshift-frr-k8s \
+          -l k8s.ovn.org/route-advertisements=cudn-advertisement \
+          -o json | jq -r '.items[] | select(.spec.nodeSelector.matchLabels."kubernetes.io/hostname" | contains("metal")) | .metadata.name'
+      environment:
+        KUBECONFIG: "{{ clusters[1].install_dir }}/auth/kubeconfig"
+      register: managed_metal_frr_configs
+      changed_when: false
+
+    - name: Add Route Server neighbor to managed bare metal worker FRRConfigurations
+      shell: |
+        export KUBECONFIG="{{ clusters[1].install_dir }}/auth/kubeconfig"
+
+        # Check if Route Server neighbor already exists
+        NEIGHBOR_EXISTS=$(oc get frrconfiguration {{ item }} -n openshift-frr-k8s \
+          -o jsonpath='{.spec.bgp.routers[0].neighbors[?(@.address=="{{ managed_route_server_ip }}")].address}' || echo "")
+
+        if [ "$NEIGHBOR_EXISTS" = "" ]; then
+          echo "Adding Route Server neighbor to {{ item }}..."
+          oc patch frrconfiguration {{ item }} -n openshift-frr-k8s --type=json -p='[
+            {
+              "op": "add",
+              "path": "/spec/bgp/routers/0/neighbors/-",
+              "value": {
+                "address": "{{ managed_route_server_ip }}",
+                "asn": {{ managed_route_server_asn }},
+                "disableMP": true,
+                "dualStackAddressFamily": false,
+                "port": 179,
+                "toAdvertise": {
+                  "allowed": {
+                    "mode": "filtered",
+                    "prefixes": ["{{ cudn_cidr }}"]
+                  }
+                },
+                "toReceive": {
+                  "allowed": {
+                    "mode": "all"
+                  }
+                }
+              }
+            }
+          ]'
+        else
+          echo "Route Server neighbor already configured in {{ item }}"
+        fi
+      environment:
+        KUBECONFIG: "{{ clusters[1].install_dir }}/auth/kubeconfig"
+      loop: "{{ managed_metal_frr_configs.stdout_lines }}"
+      register: patch_managed_worker_configs
+      changed_when: "'Adding Route Server neighbor' in patch_managed_worker_configs.stdout"
+      when: managed_metal_frr_configs.stdout_lines | length > 0
+
+    - name: Wait for managed BGP sessions to establish
+      pause:
+        seconds: 30
+        prompt: "Waiting for managed BGP sessions to establish..."
+
+    - name: Verify BGP sessions on managed workers
+      shell: |
+        export KUBECONFIG="{{ clusters[1].install_dir }}/auth/kubeconfig"
+
+        echo "=== Managed Cluster BGP Session Status ==="
+        for POD in $(oc get pods -n openshift-frr-k8s -l app.kubernetes.io/name=frr-k8s -o name | head -2); do
+          NODE=$(oc get $POD -n openshift-frr-k8s -o jsonpath='{.spec.nodeName}')
+          echo ""
+          echo "Node: $NODE"
+          oc exec -n openshift-frr-k8s $POD -c frr -- vtysh -c "show bgp summary" | grep -E "Neighbor|{{ managed_route_server_ip }}" || true
+        done
+      environment:
+        KUBECONFIG: "{{ clusters[1].install_dir }}/auth/kubeconfig"
+      register: managed_bgp_status
+      changed_when: false
+
+    - name: Display managed BGP session status
+      debug:
+        var: managed_bgp_status.stdout_lines
+
+    - name: Check managed Route Server routing database
+      shell: |
+        aws ec2 get-route-server-routing-database \
+          --region {{ aws_region }} \
+          --route-server-id {{ managed_route_server_id }} \
+          --output json | jq -r '.Routes[] | select(.Prefix=="{{ cudn_cidr }}") |
+            "Route: \(.Prefix) via \(.NextHopIp) - Status: \(.RouteStatus)"'
+      register: managed_rs_routes
+      changed_when: false
+      delegate_to: localhost
+
+    - name: Check Transit Gateway learned routes
+      shell: |
+        aws ec2 search-transit-gateway-routes \
+          --region {{ aws_region }} \
+          --transit-gateway-route-table-id $(aws ec2 describe-transit-gateways \
+            --region {{ aws_region }} \
+            --transit-gateway-ids {{ transit_gateway_id }} \
+            --query 'TransitGateways[0].Options.AssociationDefaultRouteTableId' \
+            --output text) \
+          --filters "Name=route-search.exact-match,Values={{ cudn_cidr }}" \
+          --output json | jq -r '.Routes[] |
+            "Route: \(.DestinationCidrBlock) via attachment \(.TransitGatewayAttachments[0].TransitGatewayAttachmentId) - State: \(.State) - Type: \(.Type)"'
+      register: tgw_routes
+      changed_when: false
+      delegate_to: localhost
+
+    - name: Display complete BGP configuration summary
+      debug:
+        msg:
+          - "=========================================="
+          - "Complete BGP Routing Configuration"
+          - "=========================================="
+          - ""
+          - "Managed Route Server routes:"
+          - "{{ managed_rs_routes.stdout_lines }}"
+          - ""
+          - "Transit Gateway learned routes:"
+          - "{{ tgw_routes.stdout_lines }}"
+          - ""
+          - "=== SUMMARY ==="
+          - "Shared VM network (CUDN): {{ cudn_cidr }}"
+          - "  - Hub cluster advertises to hub Route Server"
+          - "  - Managed cluster advertises to managed Route Server"
+          - "  - Both Route Servers peer with Transit Gateway via BGP"
+          - "  - Transit Gateway learns the same prefix from both clusters"
+          - "  - Automatic failover based on BGP path selection"
+          - ""
+          - "Route Server IPs:"
+          - "  Hub: {{ hub_route_server_ip }} (ASN {{ hub_route_server_asn }})"
+          - "  Managed: {{ managed_route_server_ip }} (ASN {{ managed_route_server_asn }})"
+          - ""
+          - "Transit Gateway: ASN {{ tgw_asn }}"
+          - "=========================================="

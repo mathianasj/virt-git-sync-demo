@@ -71,13 +71,17 @@
 - import_playbook: 06-import-cluster.yml
 - import_playbook: 07-frr-routers.yml
 - import_playbook: 08-bare-metal-machinesets.yml
-- import_playbook: 09-virtualization-policy.yml
-- import_playbook: 10-gitea-deployment.yml
-- import_playbook: 11-cert-manager-setup.yml
-- import_playbook: 12-virt-git-sync-setup.yml
-- import_playbook: 13-odf-setup.yml
+- import_playbook: 09-odf-setup.yml
+- import_playbook: 10-virtualization-policy.yml
+- import_playbook: 11-gitea-deployment.yml
+- import_playbook: 12-cert-manager-setup.yml
+- import_playbook: 13-virt-git-sync-setup.yml
 - import_playbook: 14-bgp-configuration.yml
 - import_playbook: 15-cudn-network.yml
+- import_playbook: 16-transit-gateway-setup.yml
+- import_playbook: 17-route-server-setup.yml
+- import_playbook: 18-route-server-bgp.yml
+- import_playbook: 19-windows-instance.yml
 
 - name: Deployment Summary
   hosts: localhost
@@ -115,8 +119,20 @@
           - "  Hub: {{ clusters[0].install_dir }}/auth/kubeconfig"
           - "  Managed: {{ clusters[1].install_dir }}/auth/kubeconfig"
           - ""
+          - "Network Infrastructure:"
+          - "  Transit Gateway: Dynamic BGP routing with Connect attachments"
+          - "  VPC Route Servers: Hub, Managed, and Bastion VPCs"
+          - "  Shared VM Network (CUDN): {{ cudn_cidr }}"
+          - "  - Advertised by both hub and managed clusters"
+          - "  - Automatic failover via BGP path selection"
+          - ""
+          - "Windows Test Instance:"
+          - "  Use RDP to connect and test failover scenarios"
+          - "  See deployment output for credentials and IP address"
+          - ""
           - "Next steps:"
           - "  1. SSH to bastion: ssh -i ~/.ssh/{{ bastion_key_name }} {{ bastion_user }}@{{ bastion_public_ip }}"
           - "  2. Export KUBECONFIG and verify clusters"
           - "  3. Access ACM console to manage both clusters"
+          - "  4. Test VM connectivity and failover from Windows instance"
           - "=========================================="

@@ -1,7 +1,18 @@
 ---
-- name: Phase 7 - FRRouting Router Deployment
+# NOTE: This playbook deploys EC2-based FRR routers.
+# As of 2026, VPC Route Server (configured in playbooks 16-18) provides
+# native AWS dynamic routing and makes these EC2 routers optional.
+#
+# EC2 routers are kept for backwards compatibility and can be used if:
+# - You need inter-VPC routing without Transit Gateway
+# - You prefer self-managed routing infrastructure
+#
+# For new deployments, VPC Route Server + Transit Gateway (playbooks 16-18)
+# is the recommended approach.
+
+- name: Phase 7 - FRRouting Router Deployment (OPTIONAL - See Note Above)
   hosts: localhost
-  gather_facts: no
+  gather_facts: yes
   become: no
   vars_files:
     - /tmp/selected-domain.yml
@@ -16,6 +27,9 @@
           - "=========================================="
           - "Phase 7: FRRouting Router Deployment"
           - "=========================================="
+          - "NOTE: EC2 routers are now OPTIONAL"
+          - "VPC Route Server provides native routing"
+          - ""
           - "Expected Runtime: 5-10 minutes"
           - "Started: {{ ansible_date_time.time }}"
           - "Estimated Completion: {{ '%02d:%02d' | format((ansible_date_time.hour | int + ((ansible_date_time.minute | int + 10) // 60)) % 24, (ansible_date_time.minute | int + 10) % 60) }}"

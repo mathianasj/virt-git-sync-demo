@@ -14,8 +14,25 @@ This project automates the complete deployment of:
 - **cert-manager** with Let's Encrypt certificates for both clusters
 - **virt-git-sync** operator for GitOps-based VM management
 - **OpenShift Data Foundation** (Ceph storage) for persistent storage
-- **FRRouting (FRR)** routers with BGP for advanced networking
-- **VM networks (CUDN)** with bridge networking and BGP route advertisement
+- **AWS VPC Route Server** - Native AWS dynamic BGP routing (2026 feature) with:
+  - Direct BGP peering from OpenShift workers to Route Server
+  - Automatic VPC route table updates for VM networks
+  - ECMP multipath routing support
+  - Deployed in hub, managed, and bastion VPCs
+- **AWS Transit Gateway** - Cross-VPC routing with dynamic BGP:
+  - **Transit Gateway Connect** attachments with GRE tunnels
+  - **BGP peering** between TGW and Route Servers in each VPC
+  - **Dynamic route learning** - same CUDN prefix from both clusters
+  - **Automatic failover** based on BGP path selection
+  - Enables bastion access to VMs with active-active or failover scenarios
+- **VM networks (CUDN)** - Layer2 ClusterUserDefinedNetwork with **shared CIDR for failover**:
+  - **Shared network:** 192.168.100.0/24 (advertised by both hub and managed clusters)
+  - Both clusters advertise the same prefix to their Route Servers
+  - Transit Gateway learns from both and selects best path dynamically
+  - Internet egress for KubeVirt VMs via OVN overlay
+  - BGP route advertisements via VPC Route Server
+  - VRF isolation (bgp-control, cudn-net) for traffic separation
+- **EC2 FRR routers (Optional)** - Legacy routing approach, superseded by VPC Route Server
 
 ### Key Features
 
@@ -77,7 +94,7 @@ See [USAGE.md](USAGE.md) for detailed instructions.
 
 ## Deployment Phases
 
-The deployment is organized into 15 sequential phases:
+The deployment is organized into 19 sequential phases:
 
 | Phase | Playbook | Description | Time |
 |-------|----------|-------------|------|
@@ -87,28 +104,62 @@ The deployment is organized into 15 sequential phases:
 | 04 | `04-openshift-install.yml` | Install hub & managed clusters in tmux (parallel) | 60-90 min |
 | 05 | `05-acm-setup.yml` | Deploy Advanced Cluster Management on hub | 15 min |
 | 06 | `06-import-cluster.yml` | Import managed cluster into ACM | 5 min |
-| 07 | `07-bare-metal-machinesets.yml` | Deploy c5.metal nodes to both clusters | 20-30 min |
-| 08 | `08-virtualization-policy.yml` | Deploy OpenShift Virtualization via ACM policy | 5-10 min |
-| 09 | `09-gitea-deployment.yml` | Deploy Gitea Git server via Helm on hub | 5-10 min |
-| 10 | `10-cert-manager-setup.yml` | Install cert-manager & Let's Encrypt certificates | 10-15 min |
-| 11 | `11-virt-git-sync-setup.yml` | Deploy virt-git-sync operator for GitOps VMs | 5 min |
-| 12 | `12-odf-setup.yml` | Deploy OpenShift Data Foundation (Ceph storage) | 20-30 min |
-| 13 | `13-frr-routers.yml` | Deploy FRRouting EC2 instances for BGP | 5-10 min |
-| 14 | `14-bgp-configuration.yml` | Configure BGP sessions between routers & nodes | 10 min |
-| 14c | `14c-worker-bgp-routing.yml` | Configure BGP routing on worker nodes | 5 min |
+| 07 | `07-frr-routers.yml` | **(OPTIONAL)** Deploy FRRouting EC2 instances | 5-10 min |
+| 08 | `08-bare-metal-machinesets.yml` | Deploy c5.metal nodes to both clusters | 20-30 min |
+| 09 | `09-odf-setup.yml` | Deploy OpenShift Data Foundation (Ceph storage) | 20-30 min |
+| 10 | `10-virtualization-policy.yml` | Deploy OpenShift Virtualization via ACM policy | 5-10 min |
+| 11 | `11-gitea-deployment.yml` | Deploy Gitea Git server via Helm on hub | 5-10 min |
+| 12 | `12-cert-manager-setup.yml` | Install cert-manager & Let's Encrypt certificates | 10-15 min |
+| 13 | `13-virt-git-sync-setup.yml` | Deploy virt-git-sync operator for GitOps VMs | 5 min |
+| 14 | `14-bgp-configuration.yml` | Configure BGP sessions & worker routing | 10-15 min |
 | 15 | `15-cudn-network.yml` | Create VM network (CUDN) with bridge & NAD | 5-10 min |
+| 16 | `16-transit-gateway-setup.yml` | Create Transit Gateway for cross-VPC routing | 5-10 min |
+| 17 | `17-route-server-setup.yml` | Deploy VPC Route Servers for dynamic BGP | 5-10 min |
+| 18 | `18-route-server-bgp.yml` | Configure TGW Connect & worker BGP peering | 10-15 min |
+| 19 | `19-windows-instance.yml` | Deploy Windows instance for failover testing | 10-15 min |
 
-**Total Time: ~2.5-3.5 hours**
+**Total Time: ~2.5-4 hours**
 
 ### Phase Details
 
 - **Phases 01-03**: Infrastructure setup (AWS resources, bastion configuration)
 - **Phase 04**: Core OpenShift installation (longest phase, runs in tmux for resilience)
 - **Phases 05-06**: ACM setup and cluster management
-- **Phases 07-08**: Bare metal nodes and virtualization platform
-- **Phases 09-11**: GitOps tooling (Gitea, cert-manager, virt-git-sync)
-- **Phase 12**: Persistent storage (OpenShift Data Foundation)
-- **Phases 13-15**: Advanced networking (BGP routing, VM networks)
+- **Phase 07**: Network infrastructure (Optional EC2 FRR routers - legacy)
+- **Phases 08-09**: Bare metal nodes and persistent storage (ODF)
+- **Phases 10-13**: OpenShift Virtualization and GitOps tooling
+- **Phases 14-15**: BGP configuration and VM network (CUDN)
+- **Phase 16**: Transit Gateway with VPC attachments
+- **Phase 17**: VPC Route Servers in all three VPCs
+- **Phase 18**: TGW Connect with dynamic BGP routing (shared CUDN prefix)
+- **Phase 19**: Windows instance in bastion VPC for failover testing
+
+### BGP Router NAT Configuration with Split Routing
+
+When `router_nat_enabled: true` (default), BGP routers are configured with dual network interfaces and the deployment uses a **split routing strategy** to ensure both worker and control plane nodes have proper connectivity:
+
+**Architecture**:
+- **Primary ENI (ens5)**: Located in worker subnet (10.X.11.0/24), used for BGP peering
+- **Secondary ENI (ens6)**: Located in public subnet (10.X.1.0/24), connected to NAT gateway
+
+**Split Routing Strategy**:
+- **Worker subnet** (10.X.11.0/24, us-east-1a): Routes internet traffic through BGP router for VM networking
+- **Control plane subnets** (10.X.12.0/24, 10.X.13.0/24): Route internet traffic directly to NAT Gateway
+- This ensures control plane nodes can reach cluster routes (OAuth, console) while workers use BGP
+
+**Traffic Flows**:
+- Worker: `Worker Node → BGP Router → NAT Gateway → Internet`
+- Control Plane: `Control Plane Node → NAT Gateway → Internet`
+- VM Network: `All Nodes → BGP Router → Worker Nodes → VMs`
+
+**Key Features**:
+- iptables MASQUERADE on ens6 for outbound NAT
+- systemd service removes DHCP routes and sets static default via NAT gateway
+- Separate route tables per subnet for control plane vs. worker routing
+- Configuration persists across reboots via iptables-services and systemd
+- Ensures cluster operators (authentication, console, ingress) remain healthy
+
+See [docs/bgp-router-nat-configuration.md](docs/bgp-router-nat-configuration.md) and [docs/split-routing-strategy.md](docs/split-routing-strategy.md) for detailed documentation.
 
 ## Directory Structure
 
@@ -122,15 +173,14 @@ The deployment is organized into 15 sequential phases:
 │   ├── 04-openshift-install.yml      # OpenShift IPI installation
 │   ├── 05-acm-setup.yml              # ACM operator & MultiClusterHub
 │   ├── 06-import-cluster.yml         # Import managed cluster
+│   ├── 13-frr-routers.yml            # FRRouting EC2 deployment (runs before bare metal)
 │   ├── 07-bare-metal-machinesets.yml # c5.metal machineset creation
 │   ├── 08-virtualization-policy.yml  # OpenShift Virtualization
 │   ├── 09-gitea-deployment.yml       # Gitea Helm deployment
 │   ├── 10-cert-manager-setup.yml     # Let's Encrypt certificates
 │   ├── 11-virt-git-sync-setup.yml    # VM GitOps operator
 │   ├── 12-odf-setup.yml              # OpenShift Data Foundation
-│   ├── 13-frr-routers.yml            # FRRouting EC2 deployment
-│   ├── 14-bgp-configuration.yml      # BGP session setup
-│   ├── 14c-worker-bgp-routing.yml    # Worker BGP routes
+│   ├── 14-bgp-configuration.yml      # BGP session setup & worker routing
 │   ├── 15-cudn-network.yml           # VM network creation
 │   └── 99-destroy-clusters.yml       # Cleanup (openshift-install destroy)
 ├── roles/
@@ -217,8 +267,21 @@ This project is provided as-is for educational and demonstration purposes.
 
 ## See Also
 
+### Project Documentation
+
 - [docs/architecture-diagrams.md](docs/architecture-diagrams.md) - Complete architecture diagrams (mermaid)
 - [USAGE.md](USAGE.md) - Detailed usage instructions and troubleshooting
+
+### CUDN & BGP Networking Documentation
+
+- [docs/CUDN_DEPLOYMENT_SUMMARY.md](docs/CUDN_DEPLOYMENT_SUMMARY.md) - CUDN deployment status and quick reference
+- [docs/cudn-bgp-vrf-implementation.md](docs/cudn-bgp-vrf-implementation.md) - Technical deep dive: CUDN with BGP and VRF
+- [docs/cudn-operations-guide.md](docs/cudn-operations-guide.md) - Operations guide and troubleshooting for CUDN
+- [docs/bgp-routing-deployment-changes.md](docs/bgp-routing-deployment-changes.md) - BGP routing configuration changes
+- [docs/split-routing-strategy.md](docs/split-routing-strategy.md) - Split routing implementation details
+
+### External Documentation
+
 - [OpenShift Documentation](https://docs.openshift.com/)
 - [ACM Documentation](https://access.redhat.com/documentation/en-us/red_hat_advanced_cluster_management_for_kubernetes/)
 - [OpenShift Virtualization Documentation](https://docs.openshift.com/container-platform/latest/virt/about_virt/about-virt.html)

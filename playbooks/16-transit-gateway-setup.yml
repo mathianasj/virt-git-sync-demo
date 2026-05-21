@@ -1,0 +1,221 @@
+---
+- name: Transit Gateway Setup for Multi-VPC Routing
+  hosts: localhost
+  gather_facts: no
+  become: no
+  vars_files:
+    - /tmp/selected-domain.yml
+  vars:
+    tgw_asn: 64515
+    # Note: Dynamic routing via TGW Connect will be configured in playbook 18
+    # after Route Server IPs are available
+
+  tasks:
+    - name: Load global variables
+      include_vars:
+        file: "{{ playbook_dir }}/../group_vars/all.yml"
+
+    - name: Create Transit Gateway
+      shell: |
+        aws ec2 create-transit-gateway \
+          --region {{ aws_region }} \
+          --description "Multi-VPC dynamic routing with Route Servers" \
+          --options "AmazonSideAsn={{ tgw_asn }},AutoAcceptSharedAttachments=enable,DefaultRouteTableAssociation=enable,DefaultRouteTablePropagation=enable,VpnEcmpSupport=enable,DnsSupport=enable" \
+          --tag-specifications 'ResourceType=transit-gateway,Tags=[{Key=Name,Value=openshift-tgw},{Key=Purpose,Value=multi-vpc-routing}]' \
+          --query 'TransitGateway.TransitGatewayId' \
+          --output text
+      register: tgw_result
+      changed_when: true
+
+    - name: Set Transit Gateway ID
+      set_fact:
+        transit_gateway_id: "{{ tgw_result.stdout }}"
+
+    - name: Wait for Transit Gateway to become available
+      shell: |
+        for i in {1..30}; do
+          STATE=$(aws ec2 describe-transit-gateways \
+            --region {{ aws_region }} \
+            --transit-gateway-ids {{ transit_gateway_id }} \
+            --query 'TransitGateways[0].State' \
+            --output text)
+          if [ "$STATE" = "available" ]; then
+            echo "available"
+            exit 0
+          fi
+          sleep 10
+        done
+        echo "timeout"
+        exit 1
+      register: tgw_wait
+      changed_when: false
+
+    - name: Get VPC IDs
+      shell: |
+        aws ec2 describe-vpcs \
+          --region {{ aws_region }} \
+          --filters "Name=tag:Name,Values={{ item }}" \
+          --query 'Vpcs[0].VpcId' \
+          --output text
+      loop:
+        - hub-cluster-vpc
+        - managed-cluster-vpc
+        - bastion-vpc
+      register: vpc_ids
+
+    - name: Set VPC ID facts
+      set_fact:
+        hub_vpc_id: "{{ vpc_ids.results[0].stdout }}"
+        managed_vpc_id: "{{ vpc_ids.results[1].stdout }}"
+        bastion_vpc_id: "{{ vpc_ids.results[2].stdout }}"
+
+    - name: Get hub VPC subnets for TGW attachment
+      shell: |
+        aws ec2 describe-subnets \
+          --region {{ aws_region }} \
+          --filters "Name=vpc-id,Values={{ hub_vpc_id }}" "Name=map-public-ip-on-launch,Values=false" \
+          --query 'Subnets[].SubnetId' \
+          --output text | tr '\t' ' '
+      register: hub_subnets
+
+    - name: Get managed VPC subnets for TGW attachment
+      shell: |
+        aws ec2 describe-subnets \
+          --region {{ aws_region }} \
+          --filters "Name=vpc-id,Values={{ managed_vpc_id }}" "Name=map-public-ip-on-launch,Values=false" \
+          --query 'Subnets[].SubnetId' \
+          --output text | tr '\t' ' '
+      register: managed_subnets
+
+    - name: Get bastion VPC subnet for TGW attachment
+      shell: |
+        aws ec2 describe-subnets \
+          --region {{ aws_region }} \
+          --filters "Name=vpc-id,Values={{ bastion_vpc_id }}" \
+          --query 'Subnets[0].SubnetId' \
+          --output text
+      register: bastion_subnet
+
+    - name: Attach hub VPC to Transit Gateway
+      shell: |
+        aws ec2 create-transit-gateway-vpc-attachment \
+          --region {{ aws_region }} \
+          --transit-gateway-id {{ transit_gateway_id }} \
+          --vpc-id {{ hub_vpc_id }} \
+          --subnet-ids {{ hub_subnets.stdout }} \
+          --tag-specifications 'ResourceType=transit-gateway-attachment,Tags=[{Key=Name,Value=hub-vpc-attachment}]' \
+          --query 'TransitGatewayVpcAttachment.TransitGatewayAttachmentId' \
+          --output text
+      register: hub_attachment
+      changed_when: true
+
+    - name: Attach managed VPC to Transit Gateway
+      shell: |
+        aws ec2 create-transit-gateway-vpc-attachment \
+          --region {{ aws_region }} \
+          --transit-gateway-id {{ transit_gateway_id }} \
+          --vpc-id {{ managed_vpc_id }} \
+          --subnet-ids {{ managed_subnets.stdout }} \
+          --tag-specifications 'ResourceType=transit-gateway-attachment,Tags=[{Key=Name,Value=managed-vpc-attachment}]' \
+          --query 'TransitGatewayVpcAttachment.TransitGatewayAttachmentId' \
+          --output text
+      register: managed_attachment
+      changed_when: true
+
+    - name: Attach bastion VPC to Transit Gateway
+      shell: |
+        aws ec2 create-transit-gateway-vpc-attachment \
+          --region {{ aws_region }} \
+          --transit-gateway-id {{ transit_gateway_id }} \
+          --vpc-id {{ bastion_vpc_id }} \
+          --subnet-ids {{ bastion_subnet.stdout }} \
+          --tag-specifications 'ResourceType=transit-gateway-attachment,Tags=[{Key=Name,Value=bastion-vpc-attachment}]' \
+          --query 'TransitGatewayVpcAttachment.TransitGatewayAttachmentId' \
+          --output text
+      register: bastion_attachment
+      changed_when: true
+
+    - name: Wait for TGW attachments to become available
+      shell: |
+        for i in {1..30}; do
+          STATES=$(aws ec2 describe-transit-gateway-vpc-attachments \
+            --region {{ aws_region }} \
+            --transit-gateway-attachment-ids {{ hub_attachment.stdout }} {{ managed_attachment.stdout }} {{ bastion_attachment.stdout }} \
+            --query 'TransitGatewayVpcAttachments[].State' \
+            --output text)
+          if ! echo "$STATES" | grep -q "pending"; then
+            echo "available"
+            exit 0
+          fi
+          sleep 10
+        done
+        echo "timeout"
+        exit 1
+      register: attachment_wait
+      changed_when: false
+
+    - name: Get bastion route table ID
+      shell: |
+        aws ec2 describe-route-tables \
+          --region {{ aws_region }} \
+          --filters "Name=vpc-id,Values={{ bastion_vpc_id }}" \
+          --query 'RouteTables[0].RouteTableId' \
+          --output text
+      register: bastion_rtb
+      changed_when: false
+
+    - name: Remove old VPC peering route for CUDN network in bastion
+      shell: |
+        aws ec2 delete-route \
+          --region {{ aws_region }} \
+          --route-table-id {{ bastion_rtb.stdout }} \
+          --destination-cidr-block {{ cudn_cidr }}
+      register: delete_old_route
+      failed_when: false
+      changed_when: delete_old_route.rc == 0
+
+    - name: Add TGW route for CUDN network in bastion VPC
+      shell: |
+        aws ec2 create-route \
+          --region {{ aws_region }} \
+          --route-table-id {{ bastion_rtb.stdout }} \
+          --destination-cidr-block {{ cudn_cidr }} \
+          --transit-gateway-id {{ transit_gateway_id }}
+      register: bastion_route
+      changed_when: true
+      failed_when:
+        - bastion_route.rc != 0
+        - "'RouteAlreadyExists' not in bastion_route.stderr"
+
+    - name: Save Transit Gateway ID to file
+      copy:
+        content: |
+          ---
+          transit_gateway_id: {{ transit_gateway_id }}
+          tgw_asn: {{ tgw_asn }}
+          hub_tgw_attachment_id: {{ hub_attachment.stdout }}
+          managed_tgw_attachment_id: {{ managed_attachment.stdout }}
+          bastion_tgw_attachment_id: {{ bastion_attachment.stdout }}
+        dest: /tmp/transit-gateway-info.yml
+        mode: '0644'
+
+    - name: Display Transit Gateway setup summary
+      debug:
+        msg:
+          - "=========================================="
+          - "Transit Gateway Setup Complete"
+          - "=========================================="
+          - "Transit Gateway ID: {{ transit_gateway_id }}"
+          - "ASN: {{ tgw_asn }}"
+          - ""
+          - "VPC Attachments:"
+          - "  Hub VPC: {{ hub_attachment.stdout }}"
+          - "  Managed VPC: {{ managed_attachment.stdout }}"
+          - "  Bastion VPC: {{ bastion_attachment.stdout }}"
+          - ""
+          - "Bastion VPC Route:"
+          - "  {{ cudn_cidr }} → TGW (will learn dynamic routes via BGP)"
+          - ""
+          - "NOTE: TGW Connect and BGP peering will be configured"
+          - "      in playbook 18 after Route Servers are ready"
+          - "=========================================="
