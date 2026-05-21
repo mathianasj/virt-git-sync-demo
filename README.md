@@ -110,7 +110,7 @@ Zero Downtime: Automatic rerouting when one cluster fails
 
 ## Deployment Phases
 
-The deployment is organized into 19 sequential phases:
+The deployment is organized into 18 sequential phases (Phase 07 is optional and skipped by default):
 
 | Phase | Playbook | Description | Time |
 |-------|----------|-------------|------|
@@ -120,7 +120,7 @@ The deployment is organized into 19 sequential phases:
 | 04 | `04-openshift-install.yml` | Install hub & managed clusters in tmux (parallel) | 60-90 min |
 | 05 | `05-acm-setup.yml` | Deploy Advanced Cluster Management on hub | 15 min |
 | 06 | `06-import-cluster.yml` | Import managed cluster into ACM | 5 min |
-| 07 | `07-frr-routers.yml` | **(OPTIONAL)** Deploy FRRouting EC2 instances | 5-10 min |
+| 07 | `07-frr-routers.yml` | **(SKIPPED)** EC2 FRR routers - superseded by VPC Route Server | 0 min |
 | 08 | `08-bare-metal-machinesets.yml` | Deploy c5.metal nodes to both clusters | 20-30 min |
 | 09 | `09-odf-setup.yml` | Deploy OpenShift Data Foundation (Ceph storage) | 20-30 min |
 | 10 | `10-virtualization-policy.yml` | Deploy OpenShift Virtualization via ACM policy | 5-10 min |
@@ -141,12 +141,12 @@ The deployment is organized into 19 sequential phases:
 - **Phases 01-03**: Infrastructure setup (AWS resources, bastion configuration)
 - **Phase 04**: Core OpenShift installation (longest phase, runs in tmux for resilience)
 - **Phases 05-06**: ACM setup and cluster management
-- **Phase 07**: Network infrastructure (Optional EC2 FRR routers - legacy)
+- **Phase 07**: SKIPPED (EC2 FRR routers superseded by VPC Route Server)
 - **Phases 08-09**: Bare metal nodes and persistent storage (ODF)
 - **Phases 10-13**: OpenShift Virtualization and GitOps tooling
 - **Phases 14-15**: BGP configuration and VM network (CUDN)
-- **Phase 16**: Transit Gateway with VPC attachments
-- **Phase 17**: VPC Route Servers in all three VPCs
+- **Phase 16**: Transit Gateway with VPC attachments (replaces VPC peering)
+- **Phase 17**: VPC Route Servers in all three VPCs (replaces EC2 routers)
 - **Phase 18**: TGW Connect with dynamic BGP routing (shared CUDN prefix)
 - **Phase 19**: Windows instance in bastion VPC for failover testing
 
