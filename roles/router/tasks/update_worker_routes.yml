@@ -36,6 +36,7 @@
     label: "{{ item.route_table_id }}"
   register: route_verification
   changed_when: false
+  delegate_to: localhost
 
 - name: Check route update status
   set_fact:

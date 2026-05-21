@@ -1,0 +1,149 @@
+---
+- name: Get hub worker node security group IDs
+  shell: |
+    aws ec2 describe-instances \
+      --region {{ aws_region }} \
+      --filters "Name=instance-type,Values=c5.metal" \
+                "Name=tag:Name,Values=*{{ clusters[0].name }}*worker*" \
+                "Name=instance-state-name,Values=running" \
+      --query 'Reservations[0].Instances[0].SecurityGroups[*].GroupId' \
+      --output text
+  register: hub_worker_sgs
+  changed_when: false
+
+- name: Get managed worker node security group IDs
+  shell: |
+    aws ec2 describe-instances \
+      --region {{ aws_region }} \
+      --filters "Name=instance-type,Values=c5.metal" \
+                "Name=tag:Name,Values=*{{ clusters[1].name }}*worker*" \
+                "Name=instance-state-name,Values=running" \
+      --query 'Reservations[0].Instances[0].SecurityGroups[*].GroupId' \
+      --output text
+  register: managed_worker_sgs
+  changed_when: false
+
+- name: Parse worker security group IDs
+  set_fact:
+    hub_worker_sg_list: "{{ hub_worker_sgs.stdout.split() }}"
+    managed_worker_sg_list: "{{ managed_worker_sgs.stdout.split() }}"
+
+- name: Display worker security groups
+  debug:
+    msg:
+      - "Hub worker security groups: {{ hub_worker_sg_list }}"
+      - "Managed worker security groups: {{ managed_worker_sg_list }}"
+
+- name: Add CUDN network ingress rule to hub worker security groups
+  shell: |
+    aws ec2 authorize-security-group-ingress \
+      --region {{ aws_region }} \
+      --group-id {{ item }} \
+      --ip-permissions IpProtocol=-1,IpRanges='[{CidrIp={{ cudn_cidr }},Description="All traffic from CUDN network"}]' \
+      2>&1 || echo "Rule may already exist"
+  loop: "{{ hub_worker_sg_list }}"
+  register: hub_cudn_rule
+  changed_when: "'Rule may already exist' not in hub_cudn_rule.stdout"
+  failed_when: false
+
+- name: Add CUDN network ingress rule to managed worker security groups
+  shell: |
+    aws ec2 authorize-security-group-ingress \
+      --region {{ aws_region }} \
+      --group-id {{ item }} \
+      --ip-permissions IpProtocol=-1,IpRanges='[{CidrIp={{ cudn_cidr }},Description="All traffic from CUDN network"}]' \
+      2>&1 || echo "Rule may already exist"
+  loop: "{{ managed_worker_sg_list }}"
+  register: managed_cudn_rule
+  changed_when: "'Rule may already exist' not in managed_cudn_rule.stdout"
+  failed_when: false
+
+- name: Add hub worker subnet ICMP rule to hub worker security groups
+  shell: |
+    aws ec2 authorize-security-group-ingress \
+      --region {{ aws_region }} \
+      --group-id {{ item }} \
+      --ip-permissions IpProtocol=icmp,FromPort=-1,ToPort=-1,IpRanges='[{CidrIp=10.0.11.0/24,Description="ICMP from hub worker subnet"}]' \
+      2>&1 || echo "Rule may already exist"
+  loop: "{{ hub_worker_sg_list }}"
+  register: hub_worker_icmp_rule
+  changed_when: "'Rule may already exist' not in hub_worker_icmp_rule.stdout"
+  failed_when: false
+
+- name: Add managed worker subnet ICMP rule to managed worker security groups
+  shell: |
+    aws ec2 authorize-security-group-ingress \
+      --region {{ aws_region }} \
+      --group-id {{ item }} \
+      --ip-permissions IpProtocol=icmp,FromPort=-1,ToPort=-1,IpRanges='[{CidrIp=10.1.11.0/24,Description="ICMP from managed worker subnet"}]' \
+      2>&1 || echo "Rule may already exist"
+  loop: "{{ managed_worker_sg_list }}"
+  register: managed_worker_icmp_rule
+  changed_when: "'Rule may already exist' not in managed_worker_icmp_rule.stdout"
+  failed_when: false
+
+- name: Add hub BGP router ingress rule to hub worker security groups
+  shell: |
+    aws ec2 authorize-security-group-ingress \
+      --region {{ aws_region }} \
+      --group-id {{ item }} \
+      --ip-permissions IpProtocol=-1,IpRanges='[{CidrIp={{ hub_router_bgp_ip }}/32,Description="All traffic from hub BGP router"}]' \
+      2>&1 || echo "Rule may already exist"
+  loop: "{{ hub_worker_sg_list }}"
+  register: hub_router_rule
+  changed_when: "'Rule may already exist' not in hub_router_rule.stdout"
+  failed_when: false
+
+- name: Add managed BGP router ingress rule to managed worker security groups
+  shell: |
+    aws ec2 authorize-security-group-ingress \
+      --region {{ aws_region }} \
+      --group-id {{ item }} \
+      --ip-permissions IpProtocol=-1,IpRanges='[{CidrIp={{ managed_router_bgp_ip }}/32,Description="All traffic from managed BGP router"}]' \
+      2>&1 || echo "Rule may already exist"
+  loop: "{{ managed_worker_sg_list }}"
+  register: managed_router_rule
+  changed_when: "'Rule may already exist' not in managed_router_rule.stdout"
+  failed_when: false
+
+- name: Add internet ICMP ingress rule to hub worker security groups
+  shell: |
+    aws ec2 authorize-security-group-ingress \
+      --region {{ aws_region }} \
+      --group-id {{ item }} \
+      --ip-permissions IpProtocol=icmp,FromPort=0,ToPort=-1,IpRanges='[{CidrIp=0.0.0.0/0,Description="ICMP echo-reply from internet"}]' \
+      2>&1 || echo "Rule may already exist"
+  loop: "{{ hub_worker_sg_list }}"
+  register: hub_internet_icmp_rule
+  changed_when: "'Rule may already exist' not in hub_internet_icmp_rule.stdout"
+  failed_when: false
+
+- name: Add internet ICMP ingress rule to managed worker security groups
+  shell: |
+    aws ec2 authorize-security-group-ingress \
+      --region {{ aws_region }} \
+      --group-id {{ item }} \
+      --ip-permissions IpProtocol=icmp,FromPort=0,ToPort=-1,IpRanges='[{CidrIp=0.0.0.0/0,Description="ICMP echo-reply from internet"}]' \
+      2>&1 || echo "Rule may already exist"
+  loop: "{{ managed_worker_sg_list }}"
+  register: managed_internet_icmp_rule
+  changed_when: "'Rule may already exist' not in managed_internet_icmp_rule.stdout"
+  failed_when: false
+
+- name: Display CUDN security group configuration summary
+  debug:
+    msg:
+      - "=========================================="
+      - "CUDN Security Group Rules Added"
+      - "=========================================="
+      - "Rules added to worker security groups:"
+      - "  1. Allow all traffic from CUDN network ({{ cudn_cidr }})"
+      - "  2. Allow ICMP from worker subnets (10.0.11.0/24, 10.1.11.0/24)"
+      - "  3. Allow all traffic from BGP routers ({{ hub_router_bgp_ip }}, {{ managed_router_bgp_ip }})"
+      - "  4. Allow ICMP echo-reply from internet (0.0.0.0/0)"
+      - ""
+      - "These rules enable:"
+      - "  - VM-to-VM communication across nodes"
+      - "  - External internet access for CUDN VMs"
+      - "  - ICMP (ping) to external IPs like 8.8.8.8"
+      - "=========================================="

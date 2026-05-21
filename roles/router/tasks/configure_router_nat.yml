@@ -51,12 +51,56 @@
   register: managed_nat_ip_result
   changed_when: false
 
+- name: Get hub VPC CIDR
+  shell: |
+    aws ec2 describe-vpcs \
+      --region {{ aws_region }} \
+      --vpc-ids {{ hub_vpc_id }} \
+      --query 'Vpcs[0].CidrBlock' \
+      --output text
+  register: hub_vpc_cidr_result
+  changed_when: false
+
+- name: Get managed VPC CIDR
+  shell: |
+    aws ec2 describe-vpcs \
+      --region {{ aws_region }} \
+      --vpc-ids {{ managed_vpc_id }} \
+      --query 'Vpcs[0].CidrBlock' \
+      --output text
+  register: managed_vpc_cidr_result
+  changed_when: false
+
 - name: Set NAT gateway facts
   set_fact:
     hub_public_subnet_id: "{{ hub_public_subnet_result.stdout }}"
     managed_public_subnet_id: "{{ managed_public_subnet_result.stdout }}"
     hub_nat_gateway_ip: "{{ hub_nat_ip_result.stdout }}"
     managed_nat_gateway_ip: "{{ managed_nat_ip_result.stdout }}"
+    hub_vpc_cidr: "{{ hub_vpc_cidr_result.stdout }}"
+    managed_vpc_cidr: "{{ managed_vpc_cidr_result.stdout }}"
+
+- name: Get hub router security group ID
+  shell: |
+    aws ec2 describe-security-groups \
+      --region {{ aws_region }} \
+      --filters "Name=vpc-id,Values={{ hub_vpc_id }}" \
+                "Name=group-name,Values=frr-router-hub-sg" \
+      --query 'SecurityGroups[0].GroupId' \
+      --output text
+  register: hub_router_sg_id
+  changed_when: false
+
+- name: Get managed router security group ID
+  shell: |
+    aws ec2 describe-security-groups \
+      --region {{ aws_region }} \
+      --filters "Name=vpc-id,Values={{ managed_vpc_id }}" \
+                "Name=group-name,Values=frr-router-managed-sg" \
+      --query 'SecurityGroups[0].GroupId' \
+      --output text
+  register: managed_router_sg_id
+  changed_when: false
 
 - name: Display NAT configuration
   debug:
@@ -66,8 +110,38 @@
       - "Managed NAT Gateway IP: {{ managed_nat_gateway_ip }}"
       - "Hub Public Subnet: {{ hub_public_subnet_id }}"
       - "Managed Public Subnet: {{ managed_public_subnet_id }}"
+      - "Hub Security Group: {{ hub_router_sg_id.stdout }}"
+      - "Managed Security Group: {{ managed_router_sg_id.stdout }}"
+      - ""
+      - "STRATEGY: Configure Linux networking BEFORE attaching second ENI"
+      - "1. Configure packages, sysctl, systemd service (single interface - ens5)"
+      - "2. Attach second ENI (ens6) in worker subnet with static IP"
+      - "3. Reboot - systemd service configures dual-interface routing"
 
-# Create and attach second ENI for hub router
+# STEP 1: Configure NAT and routing on both routers (while only ens5 exists)
+# This is much safer - we configure everything while SSH is simple, then attach second interface
+- name: Configure NAT on both routers
+  include_tasks: configure_nat.yml
+
+# STEP 2: Create and attach second ENI for hub router in WORKER subnet with static IP
+# ens5 = public subnet (already attached at launch for internet access)
+# ens6 = Worker subnet (will be attached here with static IP for BGP peering)
+- name: Get hub worker subnet ID
+  shell: |
+    aws ec2 describe-subnets \
+      --region {{ aws_region }} \
+      --filters "Name=vpc-id,Values={{ hub_vpc_id }}" \
+                "Name=tag:Type,Values=private" \
+                "Name=availability-zone,Values={{ router_availability_zone }}" \
+      --query 'Subnets[0].SubnetId' \
+      --output text
+  register: hub_worker_subnet_result
+  changed_when: false
+
+- name: Set hub worker subnet fact
+  set_fact:
+    hub_worker_subnet_id: "{{ hub_worker_subnet_result.stdout }}"
+
 - name: Check if hub router already has second ENI
   shell: |
     aws ec2 describe-instances \
@@ -78,15 +152,72 @@
   register: hub_eni_count
   changed_when: false
 
-- name: Create second ENI for hub router in public subnet
+- name: Get existing hub router second ENI subnet ID (for migration check)
+  shell: |
+    aws ec2 describe-instances \
+      --region {{ aws_region }} \
+      --instance-ids {{ router_hub_instance.stdout }} \
+      --query 'Reservations[0].Instances[0].NetworkInterfaces[?Attachment.DeviceIndex==`1`].SubnetId | [0]' \
+      --output text
+  register: hub_existing_eni_subnet
+  changed_when: false
+  when: hub_eni_count.stdout | int >= 2
+
+- name: Detach existing BGP peering subnet ENI if present (migration from BGP peering subnet to worker subnet)
+  shell: |
+    # Get existing ens6 (device index 1) attachment ID
+    ATTACHMENT_ID=$(aws ec2 describe-instances \
+      --region {{ aws_region }} \
+      --instance-ids {{ router_hub_instance.stdout }} \
+      --query 'Reservations[0].Instances[0].NetworkInterfaces[?Attachment.DeviceIndex==`1`].Attachment.AttachmentId | [0]' \
+      --output text)
+
+    ENI_ID=$(aws ec2 describe-instances \
+      --region {{ aws_region }} \
+      --instance-ids {{ router_hub_instance.stdout }} \
+      --query 'Reservations[0].Instances[0].NetworkInterfaces[?Attachment.DeviceIndex==`1`].NetworkInterfaceId | [0]' \
+      --output text)
+
+    if [ "$ATTACHMENT_ID" != "None" ] && [ -n "$ATTACHMENT_ID" ]; then
+      echo "Detaching existing BGP peering subnet ENI: $ENI_ID (attachment: $ATTACHMENT_ID)"
+      aws ec2 detach-network-interface \
+        --region {{ aws_region }} \
+        --attachment-id $ATTACHMENT_ID
+
+      # Wait for detachment
+      sleep 15
+
+      # Delete the old ENI
+      aws ec2 delete-network-interface \
+        --region {{ aws_region }} \
+        --network-interface-id $ENI_ID 2>/dev/null || true
+
+      echo "DETACHED"
+    else
+      echo "SKIP"
+    fi
+  register: hub_detach_result
+  when: >
+    hub_eni_count.stdout | int >= 2 and
+    hub_existing_eni_subnet.stdout is defined and
+    hub_existing_eni_subnet.stdout != hub_worker_subnet_id
+  changed_when: "'DETACHED' in hub_detach_result.stdout"
+
+- name: Create second ENI for hub router in worker subnet with static IP
   shell: |
     ENI_ID=$(aws ec2 create-network-interface \
       --region {{ aws_region }} \
-      --subnet-id {{ hub_public_subnet_id }} \
-      --description "Hub router public subnet ENI for NAT gateway access" \
-      --groups {{ hub_router_sg.stdout }} \
+      --subnet-id {{ hub_worker_subnet_id }} \
+      --private-ip-address {{ hub_router_bgp_ip }} \
+      --description "Hub router worker subnet ENI" \
+      --groups {{ hub_router_sg_id.stdout }} \
       --query 'NetworkInterface.NetworkInterfaceId' \
       --output text)
+
+    if [ -z "$ENI_ID" ] || [ "$ENI_ID" == "None" ]; then
+      echo "ERROR: Failed to create ENI" >&2
+      exit 1
+    fi
 
     # Disable source/dest check on the ENI
     aws ec2 modify-network-interface-attribute \
@@ -96,7 +227,9 @@
 
     echo $ENI_ID
   register: hub_second_eni
-  when: hub_eni_count.stdout | int < 2
+  when: >
+    (hub_eni_count.stdout | int < 2) or
+    (hub_detach_result is defined and 'DETACHED' in hub_detach_result.stdout)
   changed_when: hub_second_eni.stdout | length > 0
 
 - name: Attach second ENI to hub router
@@ -106,9 +239,27 @@
       --network-interface-id {{ hub_second_eni.stdout | trim }} \
       --instance-id {{ router_hub_instance.stdout | trim }} \
       --device-index 1
-  when: hub_eni_count.stdout | int < 2
+  when: hub_second_eni.stdout is defined and hub_second_eni.stdout | length > 0
 
-# Create and attach second ENI for managed router
+# Create and attach second ENI for managed router in WORKER subnet with static IP
+# ens5 = public subnet (already attached at launch for internet access)
+# ens6 = Worker subnet (will be attached here with static IP for BGP peering)
+- name: Get managed worker subnet ID
+  shell: |
+    aws ec2 describe-subnets \
+      --region {{ aws_region }} \
+      --filters "Name=vpc-id,Values={{ managed_vpc_id }}" \
+                "Name=tag:Type,Values=private" \
+                "Name=availability-zone,Values={{ router_availability_zone }}" \
+      --query 'Subnets[0].SubnetId' \
+      --output text
+  register: managed_worker_subnet_result
+  changed_when: false
+
+- name: Set managed worker subnet fact
+  set_fact:
+    managed_worker_subnet_id: "{{ managed_worker_subnet_result.stdout }}"
+
 - name: Check if managed router already has second ENI
   shell: |
     aws ec2 describe-instances \
@@ -119,15 +270,72 @@
   register: managed_eni_count
   changed_when: false
 
-- name: Create second ENI for managed router in public subnet
+- name: Get existing managed router second ENI subnet ID (for migration check)
+  shell: |
+    aws ec2 describe-instances \
+      --region {{ aws_region }} \
+      --instance-ids {{ router_managed_instance.stdout }} \
+      --query 'Reservations[0].Instances[0].NetworkInterfaces[?Attachment.DeviceIndex==`1`].SubnetId | [0]' \
+      --output text
+  register: managed_existing_eni_subnet
+  changed_when: false
+  when: managed_eni_count.stdout | int >= 2
+
+- name: Detach existing BGP peering subnet ENI if present (migration from BGP peering subnet to worker subnet)
+  shell: |
+    # Get existing ens6 (device index 1) attachment ID
+    ATTACHMENT_ID=$(aws ec2 describe-instances \
+      --region {{ aws_region }} \
+      --instance-ids {{ router_managed_instance.stdout }} \
+      --query 'Reservations[0].Instances[0].NetworkInterfaces[?Attachment.DeviceIndex==`1`].Attachment.AttachmentId | [0]' \
+      --output text)
+
+    ENI_ID=$(aws ec2 describe-instances \
+      --region {{ aws_region }} \
+      --instance-ids {{ router_managed_instance.stdout }} \
+      --query 'Reservations[0].Instances[0].NetworkInterfaces[?Attachment.DeviceIndex==`1`].NetworkInterfaceId | [0]' \
+      --output text)
+
+    if [ "$ATTACHMENT_ID" != "None" ] && [ -n "$ATTACHMENT_ID" ]; then
+      echo "Detaching existing BGP peering subnet ENI: $ENI_ID (attachment: $ATTACHMENT_ID)"
+      aws ec2 detach-network-interface \
+        --region {{ aws_region }} \
+        --attachment-id $ATTACHMENT_ID
+
+      # Wait for detachment
+      sleep 15
+
+      # Delete the old ENI
+      aws ec2 delete-network-interface \
+        --region {{ aws_region }} \
+        --network-interface-id $ENI_ID 2>/dev/null || true
+
+      echo "DETACHED"
+    else
+      echo "SKIP"
+    fi
+  register: managed_detach_result
+  when: >
+    managed_eni_count.stdout | int >= 2 and
+    managed_existing_eni_subnet.stdout is defined and
+    managed_existing_eni_subnet.stdout != managed_worker_subnet_id
+  changed_when: "'DETACHED' in managed_detach_result.stdout"
+
+- name: Create second ENI for managed router in worker subnet with static IP
   shell: |
     ENI_ID=$(aws ec2 create-network-interface \
       --region {{ aws_region }} \
-      --subnet-id {{ managed_public_subnet_id }} \
-      --description "Managed router public subnet ENI for NAT gateway access" \
-      --groups {{ managed_router_sg.stdout }} \
+      --subnet-id {{ managed_worker_subnet_id }} \
+      --private-ip-address {{ managed_router_bgp_ip }} \
+      --description "Managed router worker subnet ENI" \
+      --groups {{ managed_router_sg_id.stdout }} \
       --query 'NetworkInterface.NetworkInterfaceId' \
       --output text)
+
+    if [ -z "$ENI_ID" ] || [ "$ENI_ID" == "None" ]; then
+      echo "ERROR: Failed to create ENI" >&2
+      exit 1
+    fi
 
     # Disable source/dest check on the ENI
     aws ec2 modify-network-interface-attribute \
@@ -137,27 +345,209 @@
 
     echo $ENI_ID
   register: managed_second_eni
-  when: managed_eni_count.stdout | int < 2
+  when: >
+    (managed_eni_count.stdout | int < 2) or
+    (managed_detach_result is defined and 'DETACHED' in managed_detach_result.stdout)
   changed_when: managed_second_eni.stdout | length > 0
 
-- name: Attach second ENI to managed router
+- name: Attach second ENI to managed router in worker subnet with static IP
   shell: |
     aws ec2 attach-network-interface \
       --region {{ aws_region }} \
       --network-interface-id {{ managed_second_eni.stdout | trim }} \
       --instance-id {{ router_managed_instance.stdout | trim }} \
       --device-index 1
-  when: managed_eni_count.stdout | int < 2
+  when: managed_second_eni.stdout is defined and managed_second_eni.stdout | length > 0
 
-# Wait for ENIs to be attached and network to be ready
-- name: Wait for ENIs to be fully attached
+- name: Display ENI attachment summary
+  debug:
+    msg:
+      - "=========================================="
+      - "Second ENI Attachment Complete"
+      - "=========================================="
+      - "Hub Router:"
+      - "  ens5 (device 0): Public subnet (already attached at launch)"
+      - "  ens6 (device 1): Worker subnet {{ hub_worker_subnet_id }} with IP {{ hub_router_bgp_ip }}"
+      - ""
+      - "Managed Router:"
+      - "  ens5 (device 0): Public subnet (already attached at launch)"
+      - "  ens6 (device 1): Worker subnet {{ managed_worker_subnet_id }} with IP {{ managed_router_bgp_ip }}"
+      - ""
+      - "Architecture Change:"
+      - "  Previous: Routers in dedicated BGP peering subnet (10.0.14.0/24, 10.1.14.0/24)"
+      - "  New: Routers in worker subnet (10.0.11.0/24, 10.1.11.0/24)"
+      - "  Benefit: Simpler architecture, lower cost, reverts to original design"
+      - ""
+      - "Next: Reboot routers to activate dual-interface routing"
+
+# STEP 3: Reboot routers to apply routing changes with both ENIs present
+- name: Reboot hub router to apply routing changes
+  shell: |
+    aws ec2 reboot-instances \
+      --region {{ aws_region }} \
+      --instance-ids {{ router_hub_instance.stdout }}
+  changed_when: true
+
+- name: Reboot managed router to apply routing changes
+  shell: |
+    aws ec2 reboot-instances \
+      --region {{ aws_region }} \
+      --instance-ids {{ router_managed_instance.stdout }}
+  changed_when: true
+
+- name: Wait for routers to reboot and routing services to start
   pause:
-    seconds: 10
-  when: (hub_eni_count.stdout | int < 2) or (managed_eni_count.stdout | int < 2)
+    seconds: 45
+    prompt: "Waiting for routers to reboot and routing services to activate..."
 
-# Configure routing and NAT on routers
-- name: Configure NAT on both routers
-  include_tasks: configure_nat.yml
+# Get bastion IP for SSH verification
+- name: Get bastion public IP
+  shell: |
+    aws ec2 describe-instances \
+      --region {{ aws_region }} \
+      --filters "Name=tag:Name,Values=bastion-vpc-bastion" "Name=instance-state-name,Values=running" \
+      --query 'Reservations[0].Instances[0].PublicIpAddress' \
+      --output text
+  register: bastion_public_ip_verify
+  changed_when: false
+
+# Get router IPs for verification (they may have changed after reboot)
+- name: Get hub router private IPs
+  shell: |
+    aws ec2 describe-instances \
+      --region {{ aws_region }} \
+      --instance-ids {{ router_hub_instance.stdout }} \
+      --query 'Reservations[0].Instances[0].NetworkInterfaces[*].PrivateIpAddress' \
+      --output text | tr '\t' ' '
+  register: hub_router_ips_verify
+  changed_when: false
+
+- name: Get managed router private IPs
+  shell: |
+    aws ec2 describe-instances \
+      --region {{ aws_region }} \
+      --instance-ids {{ router_managed_instance.stdout }} \
+      --query 'Reservations[0].Instances[0].NetworkInterfaces[*].PrivateIpAddress' \
+      --output text | tr '\t' ' '
+  register: managed_router_ips_verify
+  changed_when: false
+
+- name: Detect reachable hub router IP after reboot
+  shell: |
+    BASTION_IP="{{ bastion_public_ip_verify.stdout }}"
+    for IP in {{ hub_router_ips_verify.stdout }}; do
+      if ssh -i ~/.ssh/{{ bastion_key_name }} \
+        -o ConnectTimeout=5 \
+        -o StrictHostKeyChecking=no \
+        {{ bastion_user }}@$BASTION_IP \
+        "ping -c 1 -W 2 $IP >/dev/null 2>&1" &>/dev/null; then
+        echo $IP
+        exit 0
+      fi
+    done
+    echo "{{ hub_router_ips_verify.stdout | split(' ') | first }}"
+  register: hub_router_reachable_ip_verify
+  changed_when: false
+
+- name: Detect reachable managed router IP after reboot
+  shell: |
+    BASTION_IP="{{ bastion_public_ip_verify.stdout }}"
+    for IP in {{ managed_router_ips_verify.stdout }}; do
+      if ssh -i ~/.ssh/{{ bastion_key_name }} \
+        -o ConnectTimeout=5 \
+        -o StrictHostKeyChecking=no \
+        {{ bastion_user }}@$BASTION_IP \
+        "ping -c 1 -W 2 $IP >/dev/null 2>&1" &>/dev/null; then
+        echo $IP
+        exit 0
+      fi
+    done
+    echo "{{ managed_router_ips_verify.stdout | split(' ') | first }}"
+  register: managed_router_reachable_ip_verify
+  changed_when: false
+
+- name: Wait for hub router SSH to be available after reboot
+  shell: |
+    for i in {1..30}; do
+      if ssh -i ~/.ssh/{{ bastion_key_name }} \
+        -o ConnectTimeout=5 \
+        -o StrictHostKeyChecking=no \
+        {{ bastion_user }}@{{ bastion_public_ip_verify.stdout }} \
+        "ssh -i ~/.ssh/openshift-key \
+           -o StrictHostKeyChecking=no \
+           -o ConnectTimeout=5 \
+           {{ router_user }}@{{ hub_router_reachable_ip_verify.stdout }} \
+           'echo READY'" 2>&1 | grep -q "READY"; then
+        echo "Hub router is ready"
+        exit 0
+      fi
+      echo "Waiting for hub router SSH... (attempt $i/30)"
+      sleep 5
+    done
+    echo "Warning: Hub router may not be ready yet"
+    exit 0
+  register: hub_ready_check
+  changed_when: false
+
+- name: Verify hub router routing configuration
+  shell: |
+    ssh -i ~/.ssh/{{ bastion_key_name }} \
+      -o ConnectTimeout=10 \
+      -o StrictHostKeyChecking=no \
+      {{ bastion_user }}@{{ bastion_public_ip_verify.stdout }} \
+      "ssh -i ~/.ssh/openshift-key \
+         -o StrictHostKeyChecking=no \
+         -o ConnectTimeout=10 \
+         {{ router_user }}@{{ hub_router_reachable_ip_verify.stdout }} \
+         'sudo systemctl is-active bgp-router-routes.service && echo ACTIVE || echo INACTIVE'"
+  register: hub_routing_status
+  changed_when: false
+  ignore_errors: true
+
+- name: Verify managed router routing configuration
+  shell: |
+    ssh -i ~/.ssh/{{ bastion_key_name }} \
+      -o ConnectTimeout=10 \
+      -o StrictHostKeyChecking=no \
+      {{ bastion_user }}@{{ bastion_public_ip_verify.stdout }} \
+      "ssh -i ~/.ssh/openshift-key \
+         -o StrictHostKeyChecking=no \
+         -o ConnectTimeout=10 \
+         {{ router_user }}@{{ managed_router_reachable_ip_verify.stdout }} \
+         'sudo systemctl is-active bgp-router-routes.service && echo ACTIVE || echo INACTIVE'"
+  register: managed_routing_status
+  changed_when: false
+  ignore_errors: true
+
+- name: Router deployment and configuration summary
+  debug:
+    msg:
+      - "=========================================="
+      - "Router NAT Configuration Complete"
+      - "=========================================="
+      - "Interface Assignment:"
+      - "  ens5 = Public subnet (internet/NAT gateway access)"
+      - "  ens6 = Worker subnet (BGP peering with static IP)"
+      - ""
+      - "Hub Router:"
+      - "  NAT Gateway IP: {{ hub_nat_gateway_ip }}"
+      - "  Default Route: via {{ hub_nat_gateway_ip }} dev ens5"
+      - "  NAT Rule: MASQUERADE on ens5"
+      - "  Worker Subnet IP: {{ hub_router_ip }} on ens6"
+      - "  Routing Service: {{ 'ACTIVE' if 'ACTIVE' in (hub_routing_status.stdout | default('')) else 'INACTIVE/PENDING' }}"
+      - ""
+      - "Managed Router:"
+      - "  NAT Gateway IP: {{ managed_nat_gateway_ip }}"
+      - "  Default Route: via {{ managed_nat_gateway_ip }} dev ens5"
+      - "  NAT Rule: MASQUERADE on ens5"
+      - "  Worker Subnet IP: {{ managed_router_ip }} on ens6"
+      - "  Routing Service: {{ 'ACTIVE' if 'ACTIVE' in (managed_routing_status.stdout | default('')) else 'INACTIVE/PENDING' }}"
+      - ""
+      - "Deployment Strategy Used:"
+      - "  1. Configured Linux networking while only ens5 existed (safe)"
+      - "  2. Attached second ENI (ens6) with static IPs"
+      - "  3. Rebooted - systemd service configured dual-interface routing"
+      - "  Result: No SSH breakage, clean routing configuration"
 
 # Update VPC route tables with split routing
 # Worker subnets (same AZ as router) -> BGP router

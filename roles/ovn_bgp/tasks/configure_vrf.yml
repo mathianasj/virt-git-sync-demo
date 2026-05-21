@@ -1,0 +1,200 @@
+---
+# Configure VRF for BGP peering interface isolation
+# This must run BEFORE FRRConfiguration is created
+
+- name: Skip VRF configuration (single-ENI architecture)
+  debug:
+    msg: "VRF configuration disabled - using single-ENI architecture without VRF isolation"
+- meta: end_play
+
+- name: Display VRF configuration strategy
+  debug:
+    msg:
+      - "=========================================="
+      - "Configuring BGP VRF for Interface Isolation"
+      - "=========================================="
+      - "VRF Name: {{ vrf_name }}"
+      - "VRF Table ID: {{ vrf_table_id }}"
+      - ""
+      - "Strategy:"
+      - "  - Move ens1 (BGP peering interface) to VRF"
+      - "  - Disable DHCP auto-routes on ens1"
+      - "  - BGP control plane uses VRF"
+      - "  - CUDN traffic routed via VRF (policy routing)"
+      - "  - Main table keeps DHCP default for pod traffic"
+      - "=========================================="
+
+- name: Create NMState NodeNetworkConfigurationPolicy for hub cluster VRF
+  kubernetes.core.k8s:
+    kubeconfig: "{{ clusters[0].install_dir }}/auth/kubeconfig"
+    state: present
+    definition:
+      apiVersion: nmstate.io/v1
+      kind: NodeNetworkConfigurationPolicy
+      metadata:
+        name: bgp-vrf-config-hub
+      spec:
+        nodeSelector:
+          bgp-peering: enabled
+        desiredState:
+          interfaces:
+            - name: "{{ vrf_name }}"
+              type: vrf
+              state: up
+              vrf:
+                port:
+                  - ens1
+                route-table-id: "{{ vrf_table_id }}"
+            - name: ens1
+              type: ethernet
+              state: up
+              ipv4:
+                enabled: true
+                dhcp: true
+                auto-dns: false
+                auto-gateway: false
+                auto-routes: false
+              ipv6:
+                enabled: false
+          routes:
+            config: []
+          route-rules:
+            config:
+              - ip-from: "{{ cudn_cidr }}"
+                priority: 100
+                route-table: "{{ vrf_table_id }}"
+
+- name: Create NMState NodeNetworkConfigurationPolicy for managed cluster VRF
+  kubernetes.core.k8s:
+    kubeconfig: "{{ clusters[1].install_dir }}/auth/kubeconfig"
+    state: present
+    definition:
+      apiVersion: nmstate.io/v1
+      kind: NodeNetworkConfigurationPolicy
+      metadata:
+        name: bgp-vrf-config-managed
+      spec:
+        nodeSelector:
+          bgp-peering: enabled
+        desiredState:
+          interfaces:
+            - name: "{{ vrf_name }}"
+              type: vrf
+              state: up
+              vrf:
+                port:
+                  - ens1
+                route-table-id: "{{ vrf_table_id }}"
+            - name: ens1
+              type: ethernet
+              state: up
+              ipv4:
+                enabled: true
+                dhcp: true
+                auto-dns: false
+                auto-gateway: false
+                auto-routes: false
+              ipv6:
+                enabled: false
+          routes:
+            config: []
+          route-rules:
+            config:
+              - ip-from: "{{ cudn_cidr }}"
+                priority: 100
+                route-table: "{{ vrf_table_id }}"
+
+- name: Wait for hub cluster NNCP to be applied
+  shell: |
+    for i in {1..60}; do
+      STATUS=$(oc get nncp bgp-vrf-config-hub -o jsonpath='{.status.conditions[?(@.type=="Available")].status}' 2>/dev/null || echo "Unknown")
+
+      if [ "$STATUS" = "True" ]; then
+        echo "Hub NNCP applied successfully"
+        exit 0
+      fi
+
+      sleep 5
+    done
+
+    echo "WARNING: Timeout waiting for hub NNCP"
+    oc get nncp bgp-vrf-config-hub -o yaml || true
+    exit 1
+  environment:
+    KUBECONFIG: "{{ clusters[0].install_dir }}/auth/kubeconfig"
+  register: hub_nncp_status
+  changed_when: false
+
+- name: Wait for managed cluster NNCP to be applied
+  shell: |
+    for i in {1..60}; do
+      STATUS=$(oc get nncp bgp-vrf-config-managed -o jsonpath='{.status.conditions[?(@.type=="Available")].status}' 2>/dev/null || echo "Unknown")
+
+      if [ "$STATUS" = "True" ]; then
+        echo "Managed NNCP applied successfully"
+        exit 0
+      fi
+
+      sleep 5
+    done
+
+    echo "WARNING: Timeout waiting for managed NNCP"
+    oc get nncp bgp-vrf-config-managed -o yaml || true
+    exit 1
+  environment:
+    KUBECONFIG: "{{ clusters[1].install_dir }}/auth/kubeconfig"
+  register: managed_nncp_status
+  changed_when: false
+
+- name: Verify VRF configuration on hub node
+  shell: |
+    NODE=$(oc get nodes -l bgp-peering=enabled -o jsonpath='{.items[0].metadata.name}')
+
+    if [ -z "$NODE" ]; then
+      echo "No nodes with bgp-peering=enabled found"
+      exit 1
+    fi
+
+    echo "=== Verifying VRF on $NODE ==="
+    oc debug node/$NODE -- chroot /host bash -c "
+      echo '--- VRF Interface ---'
+      ip link show {{ vrf_name }} || echo 'VRF not found!'
+      echo ''
+      echo '--- ens1 master ---'
+      ip link show ens1 | grep 'master {{ vrf_name }}' || echo 'ens1 not in VRF!'
+      echo ''
+      echo '--- Policy Routing Rules ---'
+      ip rule show | grep 'from {{ cudn_cidr }}' || echo 'No CUDN routing rule found!'
+      echo ''
+      echo '--- VRF Routing Table ---'
+      ip route show table {{ vrf_table_id }} | head -5
+    "
+  environment:
+    KUBECONFIG: "{{ clusters[0].install_dir }}/auth/kubeconfig"
+  register: hub_vrf_verify
+  changed_when: false
+  ignore_errors: yes
+
+- name: Display hub VRF verification
+  debug:
+    var: hub_vrf_verify.stdout_lines
+
+- name: Display VRF configuration summary
+  debug:
+    msg:
+      - "=========================================="
+      - "VRF Configuration Complete"
+      - "=========================================="
+      - "Hub cluster NNCP: {{ 'Success' if hub_nncp_status.rc == 0 else 'Warning - check status' }}"
+      - "Managed cluster NNCP: {{ 'Success' if managed_nncp_status.rc == 0 else 'Warning - check status' }}"
+      - ""
+      - "VRF '{{ vrf_name }}' created on BGP peering nodes"
+      - "ens1 interface moved to VRF (no DHCP routes)"
+      - "Policy rule: {{ cudn_cidr }} traffic uses table {{ vrf_table_id }}"
+      - ""
+      - "Traffic flow:"
+      - "  - CUDN VMs ({{ cudn_cidr }}) → VRF table → BGP router"
+      - "  - Pod traffic → main table → DHCP default"
+      - ""
+      - "Ready to create FRRConfiguration with VRF context"
+      - "=========================================="

@@ -22,6 +22,18 @@
   register: hub_subnet_result
   changed_when: false
 
+- name: Get hub cluster public subnet in target AZ
+  shell: |
+    aws ec2 describe-subnets \
+      --region {{ aws_region }} \
+      --filters "Name=vpc-id,Values={{ hub_vpc_result.stdout }}" \
+                "Name=availability-zone,Values={{ router_availability_zone }}" \
+                "Name=tag:Name,Values=*public*" \
+      --query 'Subnets[0].SubnetId' \
+      --output text
+  register: hub_public_subnet_result
+  changed_when: false
+
 - name: Get managed cluster VPC from existing worker nodes
   shell: |
     aws ec2 describe-instances \
@@ -45,12 +57,26 @@
   register: managed_subnet_result
   changed_when: false
 
+- name: Get managed cluster public subnet in target AZ
+  shell: |
+    aws ec2 describe-subnets \
+      --region {{ aws_region }} \
+      --filters "Name=vpc-id,Values={{ managed_vpc_result.stdout }}" \
+                "Name=availability-zone,Values={{ router_availability_zone }}" \
+                "Name=tag:Name,Values=*public*" \
+      --query 'Subnets[0].SubnetId' \
+      --output text
+  register: managed_public_subnet_result
+  changed_when: false
+
 - name: Parse network configuration
   set_fact:
     hub_vpc_id: "{{ hub_vpc_result.stdout }}"
     hub_subnet_id: "{{ hub_subnet_result.stdout }}"
+    hub_public_subnet_id: "{{ hub_public_subnet_result.stdout }}"
     managed_vpc_id: "{{ managed_vpc_result.stdout }}"
     managed_subnet_id: "{{ managed_subnet_result.stdout }}"
+    managed_public_subnet_id: "{{ managed_public_subnet_result.stdout }}"
 
 - name: Find Amazon Linux 2023 AMI
   shell: |
@@ -74,32 +100,15 @@
       exec > >(tee /var/log/user-data.log)
       exec 2>&1
 
-      # Update system
-      dnf update -y
-
-      # Enable IP forwarding
+      # Enable IP forwarding and disable reverse path filtering for multi-ENI routing
       echo "net.ipv4.ip_forward = 1" >> /etc/sysctl.conf
       echo "net.ipv6.conf.all.forwarding = 1" >> /etc/sysctl.conf
+      echo "net.ipv4.conf.all.rp_filter = 0" >> /etc/sysctl.conf
+      echo "net.ipv4.conf.default.rp_filter = 0" >> /etc/sysctl.conf
       sysctl -p
 
-      # Enable SPAL repository and install FRR
-      dnf install -y spal-release
-      dnf install -y frr
-
-      # Enable and configure FRR daemons
-      sed -i 's/^bgpd=no/bgpd=yes/' /etc/frr/daemons
-      sed -i 's/^ospfd=no/ospfd=yes/' /etc/frr/daemons
-      sed -i 's/^zebra=no/zebra=yes/' /etc/frr/daemons
-
-      # Start FRR
-      systemctl enable frr
-      systemctl start frr
-
-      # Verify installation
-      echo "FRRouting installed: $(date)" > /var/log/frr-install.log
-      systemctl status frr >> /var/log/frr-install.log 2>&1
-
-      echo "User-data script complete: $(date)"
+      # FRR installation moved to Ansible to avoid package manager lock conflicts
+      echo "User-data script complete: $(date)" > /var/log/user-data-complete.log
   delegate_to: localhost
 
 - name: Create or get security group for hub router
@@ -244,12 +253,12 @@
   debug:
     msg:
       - "Router Deployment (Amazon Linux 2023 + FRRouting)"
-      - "Hub VPC: {{ hub_vpc_id }}, Worker Subnet: {{ hub_subnet_id }} (us-east-1a)"
-      - "Managed VPC: {{ managed_vpc_id }}, Worker Subnet: {{ managed_subnet_id }} (us-east-1a)"
+      - "Hub VPC: {{ hub_vpc_id }}, Public Subnet: {{ hub_public_subnet_id }}, Worker Subnet: {{ hub_subnet_id }}"
+      - "Managed VPC: {{ managed_vpc_id }}, Public Subnet: {{ managed_public_subnet_id }}, Worker Subnet: {{ managed_subnet_id }}"
       - "AMI: {{ router_ami_result.stdout }}"
-      - "NOTE: Routers deployed in same subnet as c5.metal workers for BGP peering"
+      - "NOTE: Routers launch in PUBLIC subnet (for internet), then attach WORKER subnet (for BGP)"
 
-- name: Launch router for hub cluster with static IP
+- name: Launch router for hub cluster in public subnet
   shell: |
     # Check if instance already exists
     INSTANCE_ID=$(aws ec2 describe-instances \
@@ -260,15 +269,14 @@
       --output text 2>/dev/null)
 
     if [ "$INSTANCE_ID" == "None" ] || [ -z "$INSTANCE_ID" ]; then
-      echo "Creating new hub router instance..." >&2
-      # Launch new instance with static private IP
+      echo "Creating new hub router instance in PUBLIC subnet..." >&2
+      # Launch in public subnet (ens5) for internet access during package installation
       INSTANCE_ID=$(aws ec2 run-instances \
         --region {{ aws_region }} \
         --image-id {{ router_ami_result.stdout }} \
         --instance-type {{ router_instance_type }} \
         --key-name {{ router_key_name }} \
-        --subnet-id {{ hub_subnet_id }} \
-        --private-ip-address {{ hub_router_ip }} \
+        --subnet-id {{ hub_public_subnet_id }} \
         --security-group-ids {{ hub_router_sg.stdout }} \
         --associate-public-ip-address \
         --user-data file:///tmp/router-userdata.sh \
@@ -301,7 +309,7 @@
   register: router_hub_instance
   changed_when: "'Created instance' in router_hub_instance.stderr"
 
-- name: Launch router for managed cluster with static IP
+- name: Launch router for managed cluster in public subnet
   shell: |
     # Check if instance already exists
     INSTANCE_ID=$(aws ec2 describe-instances \
@@ -312,15 +320,14 @@
       --output text 2>/dev/null)
 
     if [ "$INSTANCE_ID" == "None" ] || [ -z "$INSTANCE_ID" ]; then
-      echo "Creating new managed router instance..." >&2
-      # Launch new instance with static private IP
+      echo "Creating new managed router instance in PUBLIC subnet..." >&2
+      # Launch in public subnet (ens5) for internet access during package installation
       INSTANCE_ID=$(aws ec2 run-instances \
         --region {{ aws_region }} \
         --image-id {{ router_ami_result.stdout }} \
         --instance-type {{ router_instance_type }} \
         --key-name {{ router_key_name }} \
-        --subnet-id {{ managed_subnet_id }} \
-        --private-ip-address {{ managed_router_ip }} \
+        --subnet-id {{ managed_public_subnet_id }} \
         --security-group-ids {{ managed_router_sg.stdout }} \
         --associate-public-ip-address \
         --user-data file:///tmp/router-userdata.sh \

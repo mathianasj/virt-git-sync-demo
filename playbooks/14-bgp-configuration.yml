@@ -1,14 +1,11 @@
 ---
 - name: Gather bastion information
   hosts: localhost
-  gather_facts: no
+  gather_facts: yes
   become: no
   vars_files:
-    - /tmp/selected-domain.yml
+    - "{{ playbook_dir }}/../group_vars/all.yml"
   tasks:
-    - name: Load global variables
-      include_vars:
-        file: "{{ playbook_dir }}/../group_vars/all.yml"
 
     - name: Display phase timing information
       debug:
@@ -46,21 +43,7 @@
   gather_facts: no
   become: no
   vars_files:
-    - /tmp/selected-domain.yml
-  pre_tasks:
-    - name: Load global variables
-      include_vars:
-        file: "{{ playbook_dir }}/../group_vars/all.yml"
-
-    - name: Update clusters configuration with selected domain
-      set_fact:
-        clusters: |
-          {% set updated_clusters = [] %}
-          {% for cluster in clusters %}
-          {% set _ = cluster.update({'base_domain': selected_base_domain}) %}
-          {% set _ = updated_clusters.append(cluster) %}
-          {% endfor %}
-          {{ updated_clusters }}
+    - "{{ playbook_dir }}/../group_vars/all.yml"
   vars:
     hub_cluster: "{{ clusters[0] }}"
 

@@ -56,12 +56,19 @@
     user_name: openshift-installer
   register: existing_keys
 
-- name: Create access key for installer user
+- name: Delete existing access keys for installer user
+  amazon.aws.iam_access_key:
+    user_name: openshift-installer
+    id: "{{ item.access_key_id }}"
+    state: absent
+  loop: "{{ existing_keys.access_keys }}"
+  when: existing_keys.access_keys | length > 0
+
+- name: Create fresh access key for installer user
   amazon.aws.iam_access_key:
     user_name: openshift-installer
     state: present
   register: installer_access_key
-  when: existing_keys.access_keys | length == 0
 
 - name: Store access key credentials locally (temporary)
   copy:
@@ -71,13 +78,11 @@
       aws_secret_access_key = {{ installer_access_key.secret_access_key }}
     dest: /tmp/aws-installer-credentials
     mode: '0600'
-  when: installer_access_key.changed
   delegate_to: localhost
 
 - name: Display access key creation status
   debug:
     msg:
       - "OpenShift Installer IAM User: {{ installer_user.user.user_name }}"
-      - "Access Key ID: {{ installer_access_key.access_key.access_key_id if installer_access_key.changed else 'Using existing key' }}"
-      - "Credentials will be configured on bastion in workspace setup"
-  when: installer_access_key is defined
+      - "Access Key ID: {{ installer_access_key.access_key.access_key_id }}"
+      - "Credentials stored at /tmp/aws-installer-credentials and will be configured on bastion"

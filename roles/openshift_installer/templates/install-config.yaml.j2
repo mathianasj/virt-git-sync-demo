@@ -47,7 +47,6 @@ platform:
       - {{ subnet_id }}
 {% endfor %}
 {% endif %}
-credentialsMode: Passthrough
 publish: External
 pullSecret: {{ pull_secret_content | tojson }}
 sshKey: |

@@ -14,6 +14,7 @@
       --output json
   register: worker_instances_raw
   changed_when: false
+  delegate_to: localhost
 
 - name: Parse worker instance information
   set_fact:
@@ -28,6 +29,7 @@
       --output text
   register: router_subnet_result
   changed_when: false
+  delegate_to: localhost
 
 - name: Set router subnet ID
   set_fact:
@@ -120,6 +122,7 @@
   register: worker_route_tables_raw
   changed_when: false
   when: worker_subnet_ids | length > 0
+  delegate_to: localhost
 
 - name: Parse worker route table information
   set_fact:

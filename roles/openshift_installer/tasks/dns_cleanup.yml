@@ -1,0 +1,85 @@
+---
+- name: Check if cluster is already installed
+  stat:
+    path: "{{ install_dir }}/auth/kubeconfig"
+  register: existing_cluster
+
+- name: Clean up DNS records for fresh installation
+  when: not existing_cluster.stat.exists
+  block:
+    - name: Get Route53 hosted zone ID
+      command: aws route53 list-hosted-zones --query "HostedZones[?Name=='{{ cluster_config.base_domain }}.'].Id" --output text
+      register: hosted_zone_id
+      changed_when: false
+      delegate_to: localhost
+
+    - name: Get existing DNS records for cluster
+      command: >
+        aws route53 list-resource-record-sets
+        --hosted-zone-id {{ hosted_zone_id.stdout }}
+        --query "ResourceRecordSets[?contains(Name, '{{ cluster_name }}')]"
+        --output json
+      register: dns_records
+      changed_when: false
+      delegate_to: localhost
+      when: hosted_zone_id.stdout != ""
+
+    - name: Parse DNS records
+      set_fact:
+        cluster_dns_records: "{{ dns_records.stdout | from_json }}"
+      when:
+        - hosted_zone_id.stdout != ""
+        - dns_records.stdout != ""
+
+    - name: Display DNS records to be deleted
+      debug:
+        msg: "Found {{ cluster_dns_records | length }} DNS records to clean up for cluster {{ cluster_name }}"
+      when:
+        - cluster_dns_records is defined
+        - cluster_dns_records | length > 0
+
+    - name: Create DNS deletion change batch
+      copy:
+        content: |
+          {
+            "Changes": [
+          {% for record in cluster_dns_records %}
+              {
+                "Action": "DELETE",
+                "ResourceRecordSet": {{ record | to_json }}
+              }{% if not loop.last %},{% endif %}
+          {% endfor %}
+            ]
+          }
+        dest: /tmp/delete-dns-{{ cluster_name }}.json
+      delegate_to: localhost
+      when:
+        - cluster_dns_records is defined
+        - cluster_dns_records | length > 0
+
+    - name: Delete DNS records from Route53
+      command: >
+        aws route53 change-resource-record-sets
+        --hosted-zone-id {{ hosted_zone_id.stdout }}
+        --change-batch file:///tmp/delete-dns-{{ cluster_name }}.json
+      delegate_to: localhost
+      when:
+        - cluster_dns_records is defined
+        - cluster_dns_records | length > 0
+      register: dns_delete_result
+
+    - name: Display DNS cleanup result
+      debug:
+        msg: "Deleted {{ cluster_dns_records | length }} DNS records for {{ cluster_name }}"
+      when:
+        - dns_delete_result is defined
+        - dns_delete_result.changed
+
+    - name: Clean up temporary DNS file
+      file:
+        path: /tmp/delete-dns-{{ cluster_name }}.json
+        state: absent
+      delegate_to: localhost
+      when:
+        - cluster_dns_records is defined
+        - cluster_dns_records | length > 0

@@ -161,10 +161,20 @@
 
     - name: Associate hub control plane subnets with new route tables
       shell: |
-        aws ec2 replace-route-table-association \
-          --region {{ aws_region }} \
-          --association-id {{ item.0.stdout }} \
-          --route-table-id {{ item.1.stdout }}
+        # If association ID is None, subnet is using main route table (implicit)
+        # Use associate-route-table to create explicit association
+        # Otherwise use replace-route-table-association
+        if [ "{{ item.0.stdout }}" == "None" ] || [ -z "{{ item.0.stdout }}" ]; then
+          aws ec2 associate-route-table \
+            --region {{ aws_region }} \
+            --subnet-id {{ item.0.item.SubnetId }} \
+            --route-table-id {{ item.1.stdout }}
+        else
+          aws ec2 replace-route-table-association \
+            --region {{ aws_region }} \
+            --association-id {{ item.0.stdout }} \
+            --route-table-id {{ item.1.stdout }}
+        fi
       loop: "{{ hub_control_assoc.results | zip(hub_control_rt.results) | list }}"
       when: hub_control_subnets | length > 0 and not item.0.skipped | default(false) and not item.1.skipped | default(false)
 
@@ -294,10 +304,20 @@
 
     - name: Associate managed control plane subnets with new route tables
       shell: |
-        aws ec2 replace-route-table-association \
-          --region {{ aws_region }} \
-          --association-id {{ item.0.stdout }} \
-          --route-table-id {{ item.1.stdout }}
+        # If association ID is None, subnet is using main route table (implicit)
+        # Use associate-route-table to create explicit association
+        # Otherwise use replace-route-table-association
+        if [ "{{ item.0.stdout }}" == "None" ] || [ -z "{{ item.0.stdout }}" ]; then
+          aws ec2 associate-route-table \
+            --region {{ aws_region }} \
+            --subnet-id {{ item.0.item.SubnetId }} \
+            --route-table-id {{ item.1.stdout }}
+        else
+          aws ec2 replace-route-table-association \
+            --region {{ aws_region }} \
+            --association-id {{ item.0.stdout }} \
+            --route-table-id {{ item.1.stdout }}
+        fi
       loop: "{{ managed_control_assoc.results | zip(managed_control_rt.results) | list }}"
       when: managed_control_subnets | length > 0 and not item.0.skipped | default(false) and not item.1.skipped | default(false)
 

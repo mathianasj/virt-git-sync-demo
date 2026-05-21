@@ -54,15 +54,6 @@
       - "{{ '  Local ASN: ' + (bgp_asn_managed | string) if routeadv_available else '' }}"
       - "=========================================="
 
-- name: Label existing FRRConfiguration on hub cluster for CUDN advertisement
-  shell: |
-    oc label frrconfiguration hub-bgp-peering -n openshift-frr-k8s advertise-cudn=true --overwrite
-  environment:
-    KUBECONFIG: "{{ clusters[0].install_dir }}/auth/kubeconfig"
-  changed_when: true
-  failed_when: false
-  when: routeadv_available | bool
-
 - name: Create RouteAdvertisement for hub cluster CUDN network
   shell: |
     cat <<EOF | oc apply -f -
@@ -87,15 +78,6 @@
   environment:
     KUBECONFIG: "{{ clusters[0].install_dir }}/auth/kubeconfig"
   changed_when: true
-  when: routeadv_available | bool
-
-- name: Label existing FRRConfiguration on managed cluster for CUDN advertisement
-  shell: |
-    oc label frrconfiguration managed-bgp-peering -n openshift-frr-k8s advertise-cudn=true --overwrite
-  environment:
-    KUBECONFIG: "{{ clusters[1].install_dir }}/auth/kubeconfig"
-  changed_when: true
-  failed_when: false
   when: routeadv_available | bool
 
 - name: Create RouteAdvertisement for managed cluster CUDN network

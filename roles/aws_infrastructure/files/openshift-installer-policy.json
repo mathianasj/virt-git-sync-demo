@@ -4,6 +4,7 @@
     {
       "Effect": "Allow",
       "Action": [
+        "autoscaling:DescribeAutoScalingGroups",
         "ec2:*",
         "elasticloadbalancing:*",
         "iam:CreateServiceLinkedRole",
@@ -17,6 +18,7 @@
         "iam:DeleteRolePolicy",
         "iam:ListRolePolicies",
         "iam:ListInstanceProfiles",
+        "iam:ListInstanceProfilesForRole",
         "iam:CreateInstanceProfile",
         "iam:DeleteInstanceProfile",
         "iam:GetInstanceProfile",
@@ -24,11 +26,32 @@
         "iam:RemoveRoleFromInstanceProfile",
         "iam:TagRole",
         "iam:TagInstanceProfile",
+        "iam:UntagRole",
         "route53:*",
         "s3:*",
         "tag:GetResources",
         "tag:TagResources",
         "tag:UntagResources"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateAccessKey",
+        "iam:CreateUser",
+        "iam:DeleteAccessKey",
+        "iam:DeleteUser",
+        "iam:DeleteUserPolicy",
+        "iam:GetUser",
+        "iam:GetUserPolicy",
+        "iam:ListAccessKeys",
+        "iam:ListAttachedRolePolicies",
+        "iam:ListUserPolicies",
+        "iam:ListUsers",
+        "iam:PutUserPolicy",
+        "iam:SimulatePrincipalPolicy",
+        "iam:TagUser"
       ],
       "Resource": "*"
     }

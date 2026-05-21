@@ -24,8 +24,8 @@ graph TB
                 HubPrivC[10.0.13.0/24<br/>us-east-1c]
             end
             
-            HubRouter[FRR Router<br/>10.0.11.111<br/>Amazon Linux 2023]
-            HubNAT[NAT Gateway]
+            HubRouter[FRR Router<br/>ENI1: 10.0.11.111 worker subnet<br/>ENI2: 10.0.1.X public subnet<br/>Amazon Linux 2023<br/>Dual ENI + NAT]
+            HubNAT[NAT Gateway<br/>10.0.1.178]
             HubIGW[Internet Gateway]
             
             subgraph "Hub OpenShift Cluster"
@@ -38,7 +38,9 @@ graph TB
             HubBareMetal --> HubPrivA
             HubMasters --> HubPrivA & HubPrivB & HubPrivC
             HubWorkers --> HubPrivA & HubPrivB & HubPrivC
-            HubPrivA & HubPrivB & HubPrivC --> HubNAT
+            HubPrivA -.VPC Route 0.0.0.0/0.-> HubRouter
+            HubRouter --> HubNAT
+            HubPrivB & HubPrivC --> HubNAT
             HubNAT --> HubPubA
             HubPubA --> HubIGW
             HubIGW --> Internet((Internet))
@@ -57,8 +59,8 @@ graph TB
                 MgdPrivC[10.1.13.0/24<br/>us-east-1c]
             end
             
-            MgdRouter[FRR Router<br/>10.1.11.224<br/>Amazon Linux 2023]
-            MgdNAT[NAT Gateway]
+            MgdRouter[FRR Router<br/>ENI1: 10.1.11.224 worker subnet<br/>ENI2: 10.1.1.X public subnet<br/>Amazon Linux 2023<br/>Dual ENI + NAT]
+            MgdNAT[NAT Gateway<br/>10.1.1.99]
             MgdIGW[Internet Gateway]
             
             subgraph "Managed OpenShift Cluster"
@@ -71,7 +73,9 @@ graph TB
             MgdBareMetal --> MgdPrivA
             MgdMasters --> MgdPrivA & MgdPrivB & MgdPrivC
             MgdWorkers --> MgdPrivA & MgdPrivB & MgdPrivC
-            MgdPrivA & MgdPrivB & MgdPrivC --> MgdNAT
+            MgdPrivA -.VPC Route 0.0.0.0/0.-> MgdRouter
+            MgdRouter --> MgdNAT
+            MgdPrivB & MgdPrivC --> MgdNAT
             MgdNAT --> MgdPubA
             MgdPubA --> MgdIGW
             MgdIGW --> Internet((Internet))
@@ -92,58 +96,71 @@ graph TB
     style MgdRouter fill:#9cf,stroke:#333,stroke-width:2px
 ```
 
-## Bare Metal BGP Routing Architecture
+## Bare Metal BGP Routing with NAT Gateway Architecture
 
 ```mermaid
 graph TB
-    subgraph "Hub Cluster - Bare Metal Node Routing"
-        subgraph "c5.metal Node (10.0.11.x)"
-            BM1[Bare Metal Node<br/>Role: worker-cnv]
-            BM1Intf[Primary Interface<br/>ens5]
-            BM1GW[Default Gateway<br/>→ 10.0.11.111]
-            BM1MC[MachineConfig<br/>98-worker-cnv-bgp-gateway]
+    subgraph "Hub Cluster - Worker Node Internet Access via BGP Router"
+        subgraph "Worker Nodes (10.0.11.0/24)"
+            Workers[Worker Nodes<br/>m5.2xlarge + c5.metal<br/>Default Route: 10.0.11.1 (DHCP)]
+            VPCRoute[VPC Route Table Override<br/>0.0.0.0/0 → BGP Router ENI]
             
-            BM1MC -.applies to.-> BM1
-            BM1 --> BM1Intf
-            BM1Intf --> BM1GW
+            Workers --> VPCRoute
         end
         
-        subgraph "FRR Router (10.0.11.111)"
-            Router1[EC2 t3.small<br/>Amazon Linux 2023]
-            Router1FRR[FRRouting Daemon<br/>BGP + OSPF]
-            Router1Fwd[IP Forwarding<br/>Enabled]
+        subgraph "BGP Router (10.0.11.111 + 10.0.1.X)"
+            subgraph "Dual ENI Configuration"
+                ENI1[ens5: 10.0.11.111<br/>Worker Subnet<br/>Primary Interface]
+                ENI2[ens6: 10.0.1.X<br/>Public Subnet<br/>NAT Gateway Access]
+            end
             
-            Router1 --> Router1FRR
-            Router1 --> Router1Fwd
+            RouterInstance[EC2 t3.small<br/>Amazon Linux 2023<br/>IP Forwarding: Enabled]
+            
+            subgraph "Routing Configuration"
+                DefaultRoute[Default Route:<br/>0.0.0.0/0 via 10.0.1.178<br/>dev ens6]
+                SystemdSvc[systemd service:<br/>bgp-router-routes.service<br/>Removes DHCP routes]
+            end
+            
+            subgraph "NAT Configuration"
+                MASQ[iptables NAT:<br/>MASQUERADE on ens6<br/>Persistent via iptables-services]
+            end
+            
+            RouterInstance --> ENI1
+            RouterInstance --> ENI2
+            RouterInstance --> DefaultRoute
+            RouterInstance --> SystemdSvc
+            RouterInstance --> MASQ
         end
         
-        BM1GW --> Router1
-        Router1 --> NATGateway[NAT Gateway<br/>10.0.1.x]
-        NATGateway --> Internet1((Internet))
+        VPCRoute --> ENI1
+        ENI2 --> NAT[NAT Gateway<br/>10.0.1.178<br/>Public Subnet]
+        NAT --> IGW[Internet Gateway]
+        IGW --> Internet((Internet))
         
-        subgraph "MachineConfig Details"
-            Script[/usr/local/bin/set-gw.sh<br/>NetworkManager Script]
-            Service[systemd-bgp-gw.service<br/>Runs on Boot]
+        subgraph "Traffic Flow"
+            Flow1[1. Worker → VPC Route → Router ens5]
+            Flow2[2. Router MASQUERADE → ens6]
+            Flow3[3. Router ens6 → NAT Gateway]
+            Flow4[4. NAT Gateway → Internet]
             
-            Script -.executed by.-> Service
-            Service -.configured by.-> BM1MC
+            Flow1 --> Flow2 --> Flow3 --> Flow4
         end
     end
     
-    subgraph "NetworkManager Configuration Process"
-        DetectIntf[Detect Primary Interface<br/>ip route show default]
-        GetConn[Get NM Connection<br/>nmcli con show]
-        ModifyGW[Modify Gateway<br/>nmcli con modify]
-        ApplyConfig[Bring Connection Up<br/>nmcli con up]
+    subgraph "Managed Cluster - Same Architecture"
+        MgdWorkers[Workers: 10.1.11.0/24]
+        MgdRouter[BGP Router:<br/>10.1.11.224 + 10.1.1.X<br/>Dual ENI Configuration]
+        MgdNAT[NAT Gateway: 10.1.1.99]
         
-        DetectIntf --> GetConn
-        GetConn --> ModifyGW
-        ModifyGW --> ApplyConfig
+        MgdWorkers --> MgdRouter
+        MgdRouter --> MgdNAT
+        MgdNAT --> Internet
     end
     
-    style BM1 fill:#f96,stroke:#333,stroke-width:3px
-    style Router1 fill:#9cf,stroke:#333,stroke-width:2px
-    style BM1MC fill:#ff9,stroke:#333,stroke-width:2px
+    style RouterInstance fill:#9cf,stroke:#333,stroke-width:3px
+    style ENI1 fill:#f96,stroke:#333,stroke-width:2px
+    style ENI2 fill:#9f9,stroke:#333,stroke-width:2px
+    style MASQ fill:#ff9,stroke:#333,stroke-width:2px
 ```
 
 ## VM Network (CUDN) Architecture

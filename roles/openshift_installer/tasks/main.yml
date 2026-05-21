@@ -5,6 +5,9 @@
     install_dir: "{{ cluster_config.install_dir }}"
     tmux_session: "{{ cluster_config.tmux_session }}"
 
+- name: Include DNS cleanup tasks
+  include_tasks: dns_cleanup.yml
+
 - name: Include install-config creation tasks
   include_tasks: install_config.yml
 

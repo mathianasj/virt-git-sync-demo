@@ -26,6 +26,9 @@
 - name: Include CUDN policy tasks
   include_tasks: cudn_policy.yml
 
+- name: Include security group configuration for CUDN
+  include_tasks: security_groups.yml
+
 - name: Include RouteAdvertisement configuration
   include_tasks: route_advertisement.yml
 
@@ -41,6 +44,11 @@
       - "VM Namespace: {{ cudn_vm_namespace }}"
       - "Namespace attached via label"
       - ""
+      - "Security Groups:"
+      - "  - CUDN network traffic allowed ({{ cudn_cidr }})"
+      - "  - BGP router traffic allowed"
+      - "  - Internet ICMP replies allowed (for ping to external IPs)"
+      - ""
       - "BGP Advertisement:"
       - "{{ '  - RouteAdvertisement resources created' if routeadv_available | default(false) else '  - Using FRRConfiguration from playbook 14 (RouteAdvertisements CRD not available)' }}"
       - "  - BGP sessions established with EC2 routers"
@@ -54,4 +62,5 @@
       - "  oc get frrconfiguration -n openshift-frr-k8s"
       - "  oc get ns {{ cudn_vm_namespace }} --show-labels"
       - "  oc get nad -n {{ cudn_vm_namespace }}"
+      - "  - VMs can ping external IPs (e.g., ping 8.8.8.8)"
       - "=========================================="
