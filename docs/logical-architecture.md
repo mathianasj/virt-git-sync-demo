@@ -2,6 +2,23 @@
 
 This document provides abstracted architecture diagrams showing the logical components and network topology without cloud provider-specific details.
 
+## Terminology Guide
+
+This architecture uses **standard networking terminology** that applies to any infrastructure (cloud or on-premises):
+
+| Generic Term | AWS Implementation | On-Premises Implementation | Description |
+|-------------|-------------------|---------------------------|-------------|
+| **ToR Switch** | VPC Route Server | Top-of-Rack Switch (Cisco/Arista/Juniper) | BGP-enabled switch in worker subnet |
+| **Core Router** | Transit Gateway | Core/Spine Router | Central routing hub, BGP route aggregation |
+| **BGP Tunnel** | Transit Gateway Connect (GRE) | GRE/IPsec tunnel | BGP peering between Core and ToR |
+| **Bare Metal Nodes** | EC2 c5.metal | Physical servers with nested virt | Workers running OpenShift Virtualization |
+| **Internet Gateway** | AWS NAT Gateway | Corporate firewall/router | Internet egress for cluster nodes |
+| **Network Segment** | VPC with CIDR | VLAN with subnet | Isolated network (10.0.0.0/16, 10.1.0.0/16) |
+| **VM Overlay Network** | CUDN (192.168.100.0/24) | VLAN + VXLAN/GENEVE | Layer 2 network for VMs |
+| **Dynamic Routing** | Route Server propagation | BGP advertisements to ToR | Automatic route updates in forwarding tables |
+
+**Key Concept:** Both clusters advertise the **same CUDN prefix** (192.168.100.0/24) to their ToR switches. The Core Router learns this prefix from both locations and provides automatic failover based on BGP path selection.
+
 ## High-Level Architecture
 
 ```mermaid
@@ -471,13 +488,77 @@ This logical architecture abstracts away cloud provider-specific implementations
 - **VPC route table overrides** → Static routes pointing to EC2 router
 - **VPC Peering** → Superseded by Transit Gateway
 
-### On-Premises Implementation
+### On-Premises Implementation Example
+
 This architecture maps directly to traditional data center deployments:
-- **Bare metal servers** in racks with CNV workloads
-- **ToR switches** (e.g., Cisco Nexus, Arista, Juniper) with BGP support
-- **Core router** providing upstream connectivity and inter-rack routing
-- **FRR-K8s** running on OpenShift nodes advertising VM routes
-- **VLAN segmentation** for network isolation (10.0.0.0/16, 10.1.0.0/16, 192.168.100.0/24)
+
+```mermaid
+graph TB
+    subgraph "Data Center - Rack 1 (Hub Cluster)"
+        subgraph "Physical Servers"
+            HubCP[Control Plane Servers<br/>Dell R650 x3<br/>10.0.11-13.x]
+            HubBM[Bare Metal Servers<br/>Dell R750 x2<br/>Nested virt enabled<br/>10.0.11.76, .183]
+        end
+        
+        HubToR[ToR Switch<br/>Cisco Nexus 9000<br/>ASN: 64514<br/>VLAN 10: 10.0.0.0/16]
+        
+        HubCP & HubBM --> HubToR
+        
+        HubFRR[FRR-K8s Pods<br/>Running on bare metal<br/>Advertise: 192.168.100.0/24]
+        HubBM -.runs.-> HubFRR
+        HubFRR -.BGP Port 179.-> HubToR
+    end
+    
+    subgraph "Data Center - Rack 2 (Managed Cluster)"
+        subgraph "Physical Servers"
+            MgdCP[Control Plane Servers<br/>Dell R650 x3<br/>10.1.11-13.x]
+            MgdBM[Bare Metal Servers<br/>Dell R750 x2<br/>Nested virt enabled<br/>10.1.11.x]
+        end
+        
+        MgdToR[ToR Switch<br/>Cisco Nexus 9000<br/>ASN: 64517<br/>VLAN 11: 10.1.0.0/16]
+        
+        MgdCP & MgdBM --> MgdToR
+        
+        MgdFRR[FRR-K8s Pods<br/>Running on bare metal<br/>Advertise: 192.168.100.0/24]
+        MgdBM -.runs.-> MgdFRR
+        MgdFRR -.BGP Port 179.-> MgdToR
+    end
+    
+    subgraph "Core Network Infrastructure"
+        Core[Core Router<br/>Cisco ASR 9000<br/>ASN: 64515<br/>ECMP + BGP Best Path]
+        
+        Firewall[Corporate Firewall<br/>Internet Gateway]
+        
+        Core --> Firewall --> Internet((Internet))
+    end
+    
+    subgraph "Management Network"
+        Bastion[Bastion Server<br/>RHEL 9<br/>Jump host + deployment]
+        Windows[Windows Workstation<br/>Testing/Admin]
+    end
+    
+    HubToR -.eBGP via GRE tunnel.-> Core
+    MgdToR -.eBGP via GRE tunnel.-> Core
+    
+    Core -.Learns 192.168.100.0/24<br/>from BOTH ToR switches.-> Note1[Automatic Failover:<br/>If Rack 1 fails,<br/>Core routes to Rack 2]
+    
+    Bastion & Windows --> Core
+    
+    style HubBM fill:#f96,stroke:#333,stroke-width:2px
+    style MgdBM fill:#f96,stroke:#333,stroke-width:2px
+    style HubToR fill:#9cf,stroke:#333,stroke-width:3px
+    style MgdToR fill:#9cf,stroke:#333,stroke-width:3px
+    style Core fill:#ff9,stroke:#333,stroke-width:4px
+    style Note1 fill:#ffc,stroke:#333,stroke-width:2px
+```
+
+**Physical Equipment:**
+- **Bare metal servers**: Dell R750, HPE DL380, Cisco UCS, or similar with nested virtualization support
+- **ToR switches**: Cisco Nexus 9000, Arista 7050, Juniper QFX series with BGP support
+- **Core router**: Cisco ASR 9000, Juniper MX series, Arista 7500 series
+- **FRR-K8s**: Open-source routing software running as pods on OpenShift nodes
+- **VLAN segmentation**: Standard 802.1Q VLANs for network isolation
+- **BGP peering**: Industry-standard eBGP between ToR and Core (typically via GRE tunnels)
 
 ### Key Benefits of This Approach
 1. **Cloud-agnostic**: Same architecture works on AWS, bare metal, or other cloud providers
@@ -500,3 +581,54 @@ The architecture shows an **active/active HA Git server** deployment across both
 - **Fault tolerance**: If one cluster fails, Git server remains available via the other cluster
 
 **Implementation options**: Gitea, GitLab, GitHub Enterprise, Bitbucket, or any Git server supporting HA deployment
+
+## Universal Concepts (Platform-Agnostic)
+
+These concepts apply to **any** deployment (AWS, on-premises, Azure, GCP, etc.):
+
+### Networking
+- ✅ **BGP (Border Gateway Protocol)** - Industry standard for dynamic routing
+- ✅ **ASN (Autonomous System Number)** - Identifies BGP routing domains
+- ✅ **eBGP (External BGP)** - BGP peering between different autonomous systems
+- ✅ **ECMP (Equal Cost Multi-Path)** - Load balancing across multiple equal-cost routes
+- ✅ **GRE Tunnels** - Generic Routing Encapsulation for BGP peering
+- ✅ **VRF (Virtual Routing and Forwarding)** - Traffic isolation via routing tables
+- ✅ **Layer 2 Overlay** - VLAN, VXLAN, or GENEVE for VM networking
+
+### Routing Strategy
+- ✅ **Shared Prefix Advertisement** - Both clusters advertise 192.168.100.0/24
+- ✅ **Dynamic Route Learning** - ToR switches propagate routes to Core Router
+- ✅ **Automatic Failover** - Core Router selects best path via BGP
+- ✅ **Zero-Downtime Migration** - BGP convergence redirects traffic (<10 sec)
+
+### OpenShift/Kubernetes
+- ✅ **FRR-K8s** - Open-source routing daemon running as pods
+- ✅ **FRRConfiguration CRD** - Declarative BGP configuration
+- ✅ **CUDN (ClusterUserDefinedNetwork)** - OVN-Kubernetes secondary network
+- ✅ **NetworkAttachmentDefinition** - Secondary network attachment for pods/VMs
+- ✅ **NodeNetworkConfigurationPolicy** - Declarative node network config (nmstate)
+
+### Virtualization & Storage
+- ✅ **OpenShift Virtualization (KubeVirt)** - VM management on Kubernetes
+- ✅ **OpenShift Data Foundation (Ceph)** - Distributed block/file/object storage
+- ✅ **Bare Metal Servers** - Nested virtualization capable hardware
+
+### Management
+- ✅ **Red Hat ACM** - Multi-cluster lifecycle and governance
+- ✅ **OpenShift GitOps (ArgoCD)** - Continuous delivery via Git
+
+## Deployment Comparison Matrix
+
+| Component | AWS | On-Premises | Azure | GCP |
+|-----------|-----|-------------|-------|-----|
+| **ToR Switch (BGP)** | VPC Route Server | Cisco/Arista/Juniper ToR | Azure Route Server | Cloud Router |
+| **Core Router** | Transit Gateway | Cisco/Juniper Core | Virtual WAN | Cloud Interconnect |
+| **BGP Tunnels** | TGW Connect (GRE) | GRE/IPsec tunnels | VPN Gateway | Cloud VPN |
+| **Bare Metal Nodes** | EC2 c5.metal | Dell/HPE/Cisco servers | Azure Bare Metal | Bare Metal Solution |
+| **Network Segments** | VPC | VLAN | VNet | VPC |
+| **Internet Egress** | NAT Gateway | Corporate firewall | NAT Gateway | Cloud NAT |
+| **FRR-K8s** | ✅ Runs as pods | ✅ Runs as pods | ✅ Runs as pods | ✅ Runs as pods |
+| **BGP Protocol** | ✅ Standard eBGP | ✅ Standard eBGP | ✅ Standard eBGP | ✅ Standard eBGP |
+| **Shared CUDN** | ✅ 192.168.100.0/24 | ✅ 192.168.100.0/24 | ✅ 192.168.100.0/24 | ✅ 192.168.100.0/24 |
+
+**Key Takeaway:** The logical architecture using BGP for dynamic routing and shared VM networks works identically across all platforms. Only the underlying infrastructure provider changes.
