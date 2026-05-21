@@ -90,11 +90,11 @@ graph TB
             MgdNodes --> MgdToR
         end
         
-        subgraph "VM Overlay Network (192.168.100.0/24)"
-            VMCIDR[Layer 2 Network<br/>CUDN: ClusterUserDefinedNetwork<br/>Persistent IPAM]
+        subgraph "Shared VM Overlay Network (192.168.100.0/24)"
+            VMCIDR[Shared Layer 2 Network<br/>CUDN: ClusterUserDefinedNetwork<br/>Same prefix advertised by both clusters<br/>Automatic failover via BGP]
             
-            HubVMs[VMs on Hub<br/>192.168.100.10-50]
-            MgdVMs[VMs on Managed<br/>192.168.100.51-100]
+            HubVMs[VMs on Hub<br/>192.168.100.x]
+            MgdVMs[VMs on Managed<br/>192.168.100.x]
             
             HubVMs --> VMCIDR
             MgdVMs --> VMCIDR
@@ -437,13 +437,17 @@ graph TB
 1. **Standard Worker Traffic**: Workers → ToR Switch → Core Router → Internet
 2. **Bare Metal Worker Traffic**: Workers → ToR Switch → Core Router → Internet
 3. **VM Traffic**: VMs → Linux Bridge → FRR-K8s BGP Advertisement → ToR Switch → Core Router
-4. **Inter-Cluster VM Routing**: 
-   - Hub cluster advertises 192.168.100.x → Hub ToR → Core Router → Managed ToR
-   - Managed cluster advertises 192.168.100.y → Managed ToR → Core Router → Hub ToR
+4. **Shared VM Network Routing (192.168.100.0/24)**: 
+   - **Hub cluster** advertises 192.168.100.0/24 → Hub ToR → Core Router
+   - **Managed cluster** advertises 192.168.100.0/24 → Managed ToR → Core Router
+   - Core Router learns **same prefix from both** clusters
+   - **Automatic failover**: If one cluster fails, Core Router switches to remaining path
+   - **Zero downtime**: BGP convergence redirects traffic without packet loss
 5. **BGP Peering Topology**:
    - FRR-K8s on bare metal nodes ↔ ToR Switch (eBGP)
-   - Hub ToR ↔ Managed ToR (eBGP, direct peering)
-   - Each ToR ↔ Core Router (eBGP)
+   - Hub ToR ↔ Core Router (eBGP via GRE tunnel)
+   - Managed ToR ↔ Core Router (eBGP via GRE tunnel)
+   - Core Router selects best path based on BGP attributes
 6. **Management Access**: Operator → Bastion → Core Network → Clusters
 
 ## Architecture Abstractions
@@ -451,12 +455,21 @@ graph TB
 This logical architecture abstracts away cloud provider-specific implementations:
 
 ### AWS Implementation → Logical Equivalent
+
+**Current Production Architecture (2026+):**
 - **EC2 c5.metal instances** → Bare metal workers with nested virtualization
-- **EC2 router with dual ENIs + NAT** → ToR switch with BGP capabilities
-- **VPC route table overrides** → BGP route advertisements from nodes to ToR
-- **AWS NAT Gateway** → Handled by core network/router
-- **VPC Peering** → Core router connecting multiple networks
+- **VPC Route Server** → ToR switch with native AWS BGP routing
+- **Transit Gateway** → Core router providing cross-VPC routing
+- **Transit Gateway Connect** → GRE tunnels for BGP peering between Core and ToR
+- **Route Server BGP sessions** → Direct BGP peering from workers to ToR
+- **Dynamic route propagation** → Automatic VPC route table updates
+- **AWS NAT Gateway** → Internet egress for nodes
 - **Security Groups** → Standard firewall rules (not shown in logical diagrams)
+
+**Legacy Architecture (Optional, backwards compatibility):**
+- **EC2 router with dual ENIs + NAT** → ToR switch with BGP capabilities (EC2-based)
+- **VPC route table overrides** → Static routes pointing to EC2 router
+- **VPC Peering** → Superseded by Transit Gateway
 
 ### On-Premises Implementation
 This architecture maps directly to traditional data center deployments:
@@ -472,6 +485,9 @@ This architecture maps directly to traditional data center deployments:
 3. **No vendor lock-in**: FRRouting is open source, runs anywhere
 4. **Scalable**: ToR/Core architecture supports growth (add more racks/clusters)
 5. **Portable VMs**: Same IP address as VMs move between clusters (BGP handles routing updates)
+6. **Automatic Failover**: Both clusters advertise same CUDN prefix; Core Router provides instant failover
+7. **Zero Downtime**: BGP convergence time (<10 seconds) ensures minimal service interruption
+8. **Active-Active or Active-Passive**: Flexible deployment based on BGP path selection policies
 
 ### HA Git Server Deployment
 The architecture shows an **active/active HA Git server** deployment across both clusters:

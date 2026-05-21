@@ -70,26 +70,42 @@ See [USAGE.md](USAGE.md) for detailed instructions.
 ## Architecture
 
 ```
-┌─────────────────┐         ┌─────────────────┐
-│   Hub Cluster   │         │ Managed Cluster │
-│  (OpenShift)    │◄────────┤  (OpenShift)    │
-│                 │   ACM   │                 │
-│  - ACM          │         │  - Imported     │
-│  - Gitea        │         │                 │
-│  - CNV          │         │  - CNV          │
-│  - 2x c5.metal  │         │  - 2x c5.metal  │
-└─────────────────┘         └─────────────────┘
-        │
-        │ AWS Infrastructure
-        ▼
-  ┌──────────────┐
-  │   Bastion    │
-  │  (RHEL 9)    │
-  │              │
-  │ - tmux       │
-  │ - oc         │
-  │ - helm       │
-  └──────────────┘
+┌─────────────────────────────────────────────────────────────────────┐
+│                      Transit Gateway (ASN 64515)                     │
+│              Dynamic BGP Route Learning & Failover                   │
+│                                                                       │
+│  Learns 192.168.100.0/24 from both clusters via Route Servers       │
+│  Automatic failover based on BGP path selection                     │
+└─────────────────────────────────────────────────────────────────────┘
+         │                         │                         │
+         │                         │                         │
+    ┌────▼────┐              ┌─────▼─────┐           ┌──────▼──────┐
+    │ Hub VPC │              │ Mgd VPC   │           │ Bastion VPC │
+    │ Route   │──BGP─┐       │ Route     │──BGP─┐    │ Route       │
+    │ Server  │      │       │ Server    │      │    │ Server      │
+    │ 64514   │      │       │ 64517     │      │    │ 64516       │
+    └─────────┘      │       └───────────┘      │    └─────────────┘
+         │           │            │              │          │
+         │           │            │              │          │
+    ┌────▼────────────▼───┐  ┌───▼──────────────▼──┐  ┌───▼─────────┐
+    │   Hub Cluster       │  │ Managed Cluster     │  │  Bastion    │
+    │   (OpenShift)       │  │  (OpenShift)        │  │  (RHEL 9)   │
+    │                     │  │                     │  │             │
+    │  - ACM              │  │  - Imported         │  │ - oc/helm   │
+    │  - Gitea            │  │  - CNV              │  │ - tmux      │
+    │  - CNV              │  │  - 2x c5.metal      │  └─────────────┘
+    │  - 2x c5.metal      │  │                     │  ┌─────────────┐
+    │                     │  │  Advertises:        │  │  Windows    │
+    │  Advertises:        │  │  192.168.100.0/24   │  │  (Testing)  │
+    │  192.168.100.0/24   │  │  to Route Server    │  │             │
+    │  to Route Server    │  │                     │  │ - RDP       │
+    └─────────────────────┘  └─────────────────────┘  │ - Failover  │
+                                                       │   Testing   │
+                                                       └─────────────┘
+
+Shared VM Network: 192.168.100.0/24 (advertised by both clusters)
+Dynamic Failover: Transit Gateway learns best path via BGP
+Zero Downtime: Automatic rerouting when one cluster fails
 ```
 
 ## Deployment Phases
