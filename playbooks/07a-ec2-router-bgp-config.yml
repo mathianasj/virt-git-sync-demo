@@ -1,0 +1,141 @@
+---
+# Phase 7a - EC2 Router BGP Configuration
+# Configures GRE tunnels to Transit Gateway and BGP sessions
+# MUST run after playbook 16 (Transit Gateway setup) to get TGW Connect peer IPs
+
+- name: Phase 7a - EC2 Router BGP Configuration
+  hosts: localhost
+  gather_facts: yes
+  become: no
+  vars_files:
+    - /tmp/selected-domain.yml
+  tasks:
+    - name: Load global variables
+      include_vars:
+        file: "{{ playbook_dir }}/../group_vars/all.yml"
+
+    - name: Check if EC2 routers are enabled
+      debug:
+        msg:
+          - "=========================================="
+          - "Phase 7a: EC2 Router BGP Configuration"
+          - "=========================================="
+          - "EC2 routers are DISABLED (ec2_routers_enabled: false)"
+          - "Skipping BGP configuration..."
+          - "=========================================="
+      when: not (ec2_routers_enabled | default(false))
+
+    - name: End play if routers are disabled
+      meta: end_play
+      when: not (ec2_routers_enabled | default(false))
+
+    - name: Display phase timing information
+      debug:
+        msg:
+          - "=========================================="
+          - "Phase 7a: EC2 Router BGP Configuration"
+          - "=========================================="
+          - "Configuring GRE tunnels and BGP sessions"
+          - ""
+          - "Expected Runtime: 5-10 minutes"
+          - "Started: {{ ansible_date_time.time }}"
+          - "Estimated Completion: {{ '%02d:%02d' | format((ansible_date_time.hour | int + ((ansible_date_time.minute | int + 10) // 60)) % 24, (ansible_date_time.minute | int + 10) % 60) }}"
+          - "=========================================="
+
+    - name: Check for Transit Gateway info file
+      stat:
+        path: /tmp/transit-gateway-info.yml
+      register: tgw_info_stat
+      failed_when: not tgw_info_stat.stat.exists
+      ignore_errors: yes
+
+    - name: Fail if Transit Gateway info not found
+      fail:
+        msg: |
+          Transit Gateway info file not found at /tmp/transit-gateway-info.yml
+          This playbook must run AFTER playbook 16 (transit-gateway-setup.yml)
+          which creates the TGW Connect peer IPs needed for GRE tunnels.
+      when: not tgw_info_stat.stat.exists
+
+    - name: Load Transit Gateway info
+      include_vars:
+        file: /tmp/transit-gateway-info.yml
+      when: tgw_info_stat.stat.exists
+
+    - name: Check for Route Server info file
+      stat:
+        path: /tmp/route-server-info.yml
+      register: rs_info_stat
+      failed_when: not rs_info_stat.stat.exists
+      ignore_errors: yes
+
+    - name: Load Route Server info if available
+      include_vars:
+        file: /tmp/route-server-info.yml
+      when: rs_info_stat.stat.exists
+
+    - name: Get bastion public IP
+      shell: |
+        aws ec2 describe-instances \
+          --region {{ aws_region }} \
+          --filters "Name=tag:Role,Values=bastion" "Name=instance-state-name,Values=running" \
+          --query 'Reservations[0].Instances[0].PublicIpAddress' \
+          --output text
+      register: bastion_ip_result
+      changed_when: false
+
+    - name: Set bastion IP fact
+      set_fact:
+        bastion_public_ip: "{{ bastion_ip_result.stdout }}"
+
+    - name: Display router configuration overview
+      debug:
+        msg:
+          - "=========================================="
+          - "Router BGP Configuration"
+          - "=========================================="
+          - "Hub Router: {{ hub_router_ip }}"
+          - "Managed Router: {{ managed_router_ip }}"
+          - "Bastion: {{ bastion_public_ip }}"
+          - "=========================================="
+
+    - name: Configure hub cluster router
+      include_role:
+        name: router_bgp
+      vars:
+        cluster_name: hub
+        router_ip: "{{ hub_router_ip }}"
+        router_asn: "{{ ec2_router_asn_hub }}"
+        openshift_asn: "{{ bgp_asn_hub }}"
+        route_server_asn: "{{ hub_tgw_peer_asn }}"
+        tgw_asn: "{{ tgw_bgp_asn }}"
+        vpc_cidr: "{{ vpcs[0].cidr }}"
+        cluster_kubeconfig: "~/cluster-hub/auth/kubeconfig"
+
+    - name: Configure managed cluster router
+      include_role:
+        name: router_bgp
+      vars:
+        cluster_name: managed
+        router_ip: "{{ managed_router_ip }}"
+        router_asn: "{{ ec2_router_asn_managed }}"
+        openshift_asn: "{{ bgp_asn_managed }}"
+        route_server_asn: "{{ managed_tgw_peer_asn }}"
+        tgw_asn: "{{ tgw_bgp_asn }}"
+        vpc_cidr: "{{ vpcs[1].cidr }}"
+        cluster_kubeconfig: "~/cluster-managed/auth/kubeconfig"
+
+    - name: Display configuration summary
+      debug:
+        msg:
+          - "=========================================="
+          - "EC2 Router BGP Configuration Complete"
+          - "=========================================="
+          - "Both routers configured with:"
+          - "  - GRE tunnels to Transit Gateway"
+          - "  - BGP sessions: OpenShift, Route Server, TGW"
+          - ""
+          - "Verification:"
+          - "  ssh -i ~/.ssh/{{ bastion_key_name }} {{ bastion_user }}@{{ bastion_public_ip }}"
+          - "  ssh ec2-user@{{ hub_router_ip }} 'sudo vtysh -c \"show bgp summary\"'"
+          - "=========================================="

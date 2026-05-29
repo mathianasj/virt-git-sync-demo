@@ -1,0 +1,189 @@
+---
+# Configure EC2 Router with GRE tunnel and BGP sessions
+
+- name: Get OpenShift worker node IPs
+  shell: |
+    ssh -i ~/.ssh/{{ bastion_key_name }} -o StrictHostKeyChecking=no {{ bastion_user }}@{{ bastion_public_ip }} \
+      "oc --kubeconfig {{ cluster_kubeconfig }} get nodes -l node-role.kubernetes.io/worker \
+       -o jsonpath='{.items[*].status.addresses[?(@.type==\"InternalIP\")].address}'"
+  register: worker_ips_raw
+  changed_when: false
+  delegate_to: localhost
+
+- name: Parse worker IPs
+  set_fact:
+    openshift_worker_ips: "{{ worker_ips_raw.stdout.split() }}"
+
+- name: Display worker IPs discovered
+  debug:
+    msg: "Found {{ openshift_worker_ips | length }} OpenShift workers: {{ openshift_worker_ips }}"
+
+- name: Get Route Server IP for this cluster
+  set_fact:
+    route_server_ip: "{{ (cluster_name == 'hub') | ternary(hub_route_server_ip | default('10.0.11.223'), managed_route_server_ip | default('10.1.11.224')) }}"
+  when: route_server_ip is not defined
+
+- name: Get TGW Connect peer IPs (primary and secondary)
+  set_fact:
+    tgw_connect_primary: "169.254.100.2"
+    tgw_connect_secondary: "169.254.100.3"
+
+- name: Display BGP configuration parameters
+  debug:
+    msg:
+      - "Cluster: {{ cluster_name }}"
+      - "Router IP: {{ router_ip }}"
+      - "Router ASN: {{ router_asn }}"
+      - "OpenShift ASN: {{ openshift_asn }}"
+      - "Route Server IP: {{ route_server_ip }}"
+      - "Route Server ASN: {{ route_server_asn }}"
+      - "TGW ASN: {{ tgw_asn }}"
+      - "OpenShift Workers: {{ openshift_worker_ips }}"
+
+# GRE Tunnel Configuration
+- name: Create GRE tunnel netdev configuration
+  shell: |
+    ssh -i ~/.ssh/{{ bastion_key_name }} -o StrictHostKeyChecking=no {{ bastion_user }}@{{ bastion_public_ip }} \
+      "ssh -o StrictHostKeyChecking=no ec2-user@{{ router_ip }} 'sudo tee /etc/systemd/network/10-gre-tgw.netdev > /dev/null <<EOF
+[NetDev]
+Name=gre-tgw
+Kind=gre
+
+[Tunnel]
+Local={{ router_ip }}
+Remote={{ tgw_connect_primary }}
+TTL=255
+EOF
+'"
+  changed_when: true
+  delegate_to: localhost
+
+- name: Create GRE tunnel network configuration
+  shell: |
+    ssh -i ~/.ssh/{{ bastion_key_name }} -o StrictHostKeyChecking=no {{ bastion_user }}@{{ bastion_public_ip }} \
+      "ssh -o StrictHostKeyChecking=no ec2-user@{{ router_ip }} 'sudo tee /etc/systemd/network/10-gre-tgw.network > /dev/null <<EOF
+[Match]
+Name=gre-tgw
+
+[Network]
+Address=169.254.100.1/29
+EOF
+'"
+  changed_when: true
+  delegate_to: localhost
+
+- name: Restart systemd-networkd to apply GRE tunnel
+  shell: |
+    ssh -i ~/.ssh/{{ bastion_key_name }} -o StrictHostKeyChecking=no {{ bastion_user }}@{{ bastion_public_ip }} \
+      "ssh -o StrictHostKeyChecking=no ec2-user@{{ router_ip }} 'sudo systemctl restart systemd-networkd'"
+  changed_when: true
+  delegate_to: localhost
+
+- name: Wait for GRE tunnel to be active
+  pause:
+    seconds: 5
+
+- name: Verify GRE tunnel interface exists
+  shell: |
+    ssh -i ~/.ssh/{{ bastion_key_name }} -o StrictHostKeyChecking=no {{ bastion_user }}@{{ bastion_public_ip }} \
+      "ssh -o StrictHostKeyChecking=no ec2-user@{{ router_ip }} 'ip addr show gre-tgw'"
+  register: gre_tunnel_check
+  changed_when: false
+  failed_when: gre_tunnel_check.rc != 0
+  delegate_to: localhost
+
+- name: Display GRE tunnel status
+  debug:
+    msg: "{{ gre_tunnel_check.stdout_lines }}"
+
+# FRR BGP Configuration
+- name: Backup existing FRR configuration
+  shell: |
+    ssh -i ~/.ssh/{{ bastion_key_name }} -o StrictHostKeyChecking=no {{ bastion_user }}@{{ bastion_public_ip }} \
+      "ssh -o StrictHostKeyChecking=no ec2-user@{{ router_ip }} \
+       'sudo cp /etc/frr/frr.conf /etc/frr/frr.conf.backup.\$(date +%Y%m%d_%H%M%S)'"
+  changed_when: true
+  delegate_to: localhost
+
+- name: Generate FRR BGP configuration
+  template:
+    src: frr-router-bgp.conf.j2
+    dest: /tmp/frr-{{ cluster_name }}-router.conf
+  delegate_to: localhost
+
+- name: Copy FRR configuration to router
+  shell: |
+    scp -i ~/.ssh/{{ bastion_key_name }} -o StrictHostKeyChecking=no \
+      /tmp/frr-{{ cluster_name }}-router.conf {{ bastion_user }}@{{ bastion_public_ip }}:/tmp/frr-router.conf
+  changed_when: true
+  delegate_to: localhost
+
+- name: Deploy FRR configuration on router
+  shell: |
+    ssh -i ~/.ssh/{{ bastion_key_name }} -o StrictHostKeyChecking=no {{ bastion_user }}@{{ bastion_public_ip }} \
+      "scp -o StrictHostKeyChecking=no /tmp/frr-router.conf ec2-user@{{ router_ip }}:/tmp/frr.conf && \
+       ssh -o StrictHostKeyChecking=no ec2-user@{{ router_ip }} \
+       'sudo mv /tmp/frr.conf /etc/frr/frr.conf && \
+        sudo chown frr:frr /etc/frr/frr.conf && \
+        sudo chmod 640 /etc/frr/frr.conf'"
+  changed_when: true
+  delegate_to: localhost
+
+- name: Restart FRR to apply BGP configuration
+  shell: |
+    ssh -i ~/.ssh/{{ bastion_key_name }} -o StrictHostKeyChecking=no {{ bastion_user }}@{{ bastion_public_ip }} \
+      "ssh -o StrictHostKeyChecking=no ec2-user@{{ router_ip }} 'sudo systemctl restart frr'"
+  changed_when: true
+  delegate_to: localhost
+
+- name: Wait for FRR to start and BGP sessions to establish
+  pause:
+    seconds: 15
+
+# Validation
+- name: Check FRR service status
+  shell: |
+    ssh -i ~/.ssh/{{ bastion_key_name }} -o StrictHostKeyChecking=no {{ bastion_user }}@{{ bastion_public_ip }} \
+      "ssh -o StrictHostKeyChecking=no ec2-user@{{ router_ip }} 'sudo systemctl is-active frr'"
+  register: frr_status
+  changed_when: false
+  failed_when: frr_status.stdout != "active"
+  delegate_to: localhost
+
+- name: Get BGP summary
+  shell: |
+    ssh -i ~/.ssh/{{ bastion_key_name }} -o StrictHostKeyChecking=no {{ bastion_user }}@{{ bastion_public_ip }} \
+      "ssh -o StrictHostKeyChecking=no ec2-user@{{ router_ip }} 'sudo vtysh -c \"show bgp summary\"'"
+  register: bgp_summary
+  changed_when: false
+  delegate_to: localhost
+
+- name: Display BGP summary
+  debug:
+    msg: "{{ bgp_summary.stdout_lines }}"
+
+- name: Check for established BGP sessions
+  shell: |
+    ssh -i ~/.ssh/{{ bastion_key_name }} -o StrictHostKeyChecking=no {{ bastion_user }}@{{ bastion_public_ip }} \
+      "ssh -o StrictHostKeyChecking=no ec2-user@{{ router_ip }} \
+       'sudo vtysh -c \"show bgp summary\" | grep -c Established || echo 0'"
+  register: bgp_established_count
+  changed_when: false
+  delegate_to: localhost
+
+- name: Verify minimum BGP sessions established
+  debug:
+    msg: "{{ bgp_established_count.stdout }} BGP sessions established (expected: 3+)"
+
+- name: Warn if BGP sessions not fully established
+  debug:
+    msg: "WARNING: Only {{ bgp_established_count.stdout }} BGP sessions established. Expected at least 3 (OpenShift workers, Route Server, TGW). Sessions may still be establishing..."
+  when: (bgp_established_count.stdout | int) < 3
+
+- name: Configuration complete for {{ cluster_name }} router
+  debug:
+    msg:
+      - "BGP router configuration complete for {{ cluster_name }}"
+      - "Router: {{ router_ip }}"
+      - "GRE tunnel: Active"
+      - "BGP sessions: {{ bgp_established_count.stdout }} established"

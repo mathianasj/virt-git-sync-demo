@@ -69,16 +69,26 @@
 - import_playbook: 04-openshift-install.yml
 - import_playbook: 05-acm-setup.yml
 - import_playbook: 06-import-cluster.yml
-# - import_playbook: 07-frr-routers.yml  # OPTIONAL: EC2 routers superseded by VPC Route Server (playbooks 16-18)
+- import_playbook: 07-frr-routers.yml  # EC2 routers with GRE to TGW (required for bastion-to-VM routing)
 - import_playbook: 08-bare-metal-machinesets.yml
 - import_playbook: 09-odf-setup.yml
 - import_playbook: 10-virtualization-policy.yml
 - import_playbook: 11-gitea-deployment.yml
+- import_playbook: 11a-openshift-gitops.yml
 - import_playbook: 12-cert-manager-setup.yml
 - import_playbook: 13-virt-git-sync-setup.yml
 - import_playbook: 14-bgp-configuration.yml
 - import_playbook: 15-cudn-network.yml
+# CUDN network configuration (playbook 15 handles core CUDN setup)
+# Playbooks 15a-15c are intentional placeholders - functionality is covered by:
+# - 15a: AWS security groups handled in playbook 15
+# - 15b: FRR BGP config handled in playbook 14
+# - 15c: Worker routing handled in playbook 14
+- import_playbook: 15a-cudn-aws-config.yml
+- import_playbook: 15b-frr-router-cudn-config.yml
+- import_playbook: 15c-worker-cudn-config.yml
 - import_playbook: 16-transit-gateway-setup.yml
+- import_playbook: 07a-ec2-router-bgp-config.yml  # Automate EC2 router GRE tunnels and BGP (requires TGW Connect info)
 - import_playbook: 17-route-server-setup.yml
 - import_playbook: 18-route-server-bgp.yml
 - import_playbook: 19-windows-instance.yml
@@ -103,7 +113,37 @@
           {% set _ = updated_clusters.append(cluster) %}
           {% endfor %}
           {{ updated_clusters }}
+
+    - name: Get bastion public IP from AWS
+      shell: |
+        aws ec2 describe-instances \
+          --region {{ aws_region }} \
+          --filters "Name=tag:Role,Values=bastion" "Name=instance-state-name,Values=running" \
+          --query 'Reservations[0].Instances[0].PublicIpAddress' \
+          --output text
+      register: bastion_ip_result
+      changed_when: false
+
+    - name: Add bastion to inventory
+      add_host:
+        name: bastion_host
+        groups: bastion_summary
+        ansible_host: "{{ bastion_ip_result.stdout }}"
+        ansible_user: "{{ bastion_user }}"
+        ansible_ssh_private_key_file: "~/.ssh/{{ bastion_key_name }}"
+        ansible_ssh_common_args: "-o StrictHostKeyChecking=no"
+        ansible_python_interpreter: /usr/bin/python3
+
   tasks:
+    - name: Get ArgoCD admin password from bastion
+      shell: |
+        oc get secret openshift-gitops-cluster -n openshift-gitops -o jsonpath='{.data.admin\.password}' | base64 -d
+      environment:
+        KUBECONFIG: "{{ clusters[0].install_dir }}/auth/kubeconfig"
+      register: argocd_password
+      changed_when: false
+      delegate_to: bastion_host
+
     - name: Display deployment completion summary
       debug:
         msg:
@@ -113,7 +153,14 @@
           - "Hub Cluster Console: https://console-openshift-console.apps.{{ clusters[0].cluster_name }}.{{ selected_base_domain }}"
           - "Managed Cluster Console: https://console-openshift-console.apps.{{ clusters[1].cluster_name }}.{{ selected_base_domain }}"
           - "ACM Console: https://multicloud-console.apps.{{ clusters[0].cluster_name }}.{{ selected_base_domain }}"
+          - ""
           - "Gitea URL: https://gitea-{{ gitea_namespace }}.apps.{{ clusters[0].cluster_name }}.{{ selected_base_domain }}"
+          - "  Username: {{ gitea_admin_user }}"
+          - "  Password: {{ gitea_admin_password }}"
+          - ""
+          - "ArgoCD Console: https://openshift-gitops-server-openshift-gitops.apps.{{ clusters[0].cluster_name }}.{{ selected_base_domain }}"
+          - "  Username: admin"
+          - "  Password: {{ argocd_password.stdout }}"
           - ""
           - "Kubeconfig files are located on bastion:"
           - "  Hub: {{ clusters[0].install_dir }}/auth/kubeconfig"
@@ -131,8 +178,9 @@
           - "  See deployment output for credentials and IP address"
           - ""
           - "Next steps:"
-          - "  1. SSH to bastion: ssh -i ~/.ssh/{{ bastion_key_name }} {{ bastion_user }}@{{ bastion_public_ip }}"
+          - "  1. SSH to bastion: ssh -i ~/.ssh/{{ bastion_key_name }} {{ bastion_user }}@{{ bastion_ip_result.stdout }}"
           - "  2. Export KUBECONFIG and verify clusters"
           - "  3. Access ACM console to manage both clusters"
-          - "  4. Test VM connectivity and failover from Windows instance"
+          - "  4. Access ArgoCD console for GitOps workflows"
+          - "  5. Test VM connectivity and failover from Windows instance"
           - "=========================================="

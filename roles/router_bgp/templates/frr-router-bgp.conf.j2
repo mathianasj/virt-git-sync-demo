@@ -1,0 +1,75 @@
+# FRR Configuration for BGP Route Reflector
+# Acts as hub between OpenShift, Route Server, and Transit Gateway
+# Cluster: {{ cluster_name }}
+
+frr version 8.5
+frr defaults traditional
+hostname {{ cluster_name }}-bgp-router
+log syslog informational
+no ipv6 forwarding
+service integrated-vtysh-config
+!
+# BGP Configuration
+router bgp {{ router_asn }}
+ bgp router-id {{ router_ip }}
+ bgp log-neighbor-changes
+ no bgp ebgp-requires-policy
+ !
+ ! iBGP with OpenShift Workers
+ neighbor OPENSHIFT peer-group
+ neighbor OPENSHIFT remote-as {{ openshift_asn }}
+ neighbor OPENSHIFT description OpenShift-Workers
+{% for worker_ip in openshift_worker_ips %}
+ neighbor {{ worker_ip }} peer-group OPENSHIFT
+ neighbor {{ worker_ip }} description Worker-{{ loop.index }}
+{% endfor %}
+ !
+ ! eBGP with Route Server
+ neighbor {{ route_server_ip }} remote-as {{ route_server_asn }}
+ neighbor {{ route_server_ip }} description VPC-Route-Server
+ !
+ ! eBGP with Transit Gateway Connect
+ neighbor TGW peer-group
+ neighbor TGW remote-as {{ tgw_asn }}
+ neighbor TGW description Transit-Gateway
+ neighbor TGW update-source gre-tgw
+ neighbor {{ tgw_connect_primary }} peer-group TGW
+ neighbor {{ tgw_connect_primary }} description TGW-Connect-Primary
+ neighbor {{ tgw_connect_secondary }} peer-group TGW
+ neighbor {{ tgw_connect_secondary }} description TGW-Connect-Secondary
+ !
+ ! IPv4 Unicast Address Family
+ address-family ipv4 unicast
+  ! Receive routes from OpenShift
+  neighbor OPENSHIFT activate
+  neighbor OPENSHIFT route-map FROM-OPENSHIFT in
+  !
+  ! Advertise to Route Server
+  neighbor {{ route_server_ip }} activate
+  neighbor {{ route_server_ip }} route-map TO-ROUTE-SERVER out
+  !
+  ! Advertise to Transit Gateway
+  neighbor TGW activate
+  neighbor TGW route-map TO-TGW out
+ exit-address-family
+exit
+!
+! Prefix Lists
+ip prefix-list CUDN permit {{ cudn_cidr }}
+!
+! Route Maps
+route-map FROM-OPENSHIFT permit 10
+ match ip address prefix-list CUDN
+ set metric 100
+exit
+!
+route-map TO-ROUTE-SERVER permit 10
+ match ip address prefix-list CUDN
+exit
+!
+route-map TO-TGW permit 10
+ match ip address prefix-list CUDN
+exit
+!
+line vty
+!

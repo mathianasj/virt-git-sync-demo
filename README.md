@@ -11,8 +11,9 @@ This project automates the complete deployment of:
 - **Bare metal workers** (c5.metal) for both clusters via day 2 machinesets
 - **OpenShift Virtualization** deployed via ACM policy to both clusters
 - **Gitea** git server on hub cluster via Helm
+- **OpenShift GitOps (ArgoCD)** for continuous delivery and multi-cluster GitOps
 - **cert-manager** with Let's Encrypt certificates for both clusters
-- **virt-git-sync** operator for GitOps-based VM management
+- **virt-git-sync** operator with ArgoCD integration for bidirectional GitOps VM lifecycle management
 - **OpenShift Data Foundation** (Ceph storage) for persistent storage
 - **AWS VPC Route Server** - Native AWS dynamic BGP routing (2026 feature) with:
   - Direct BGP peering from OpenShift workers to Route Server
@@ -25,14 +26,19 @@ This project automates the complete deployment of:
   - **Dynamic route learning** - same CUDN prefix from both clusters
   - **Automatic failover** based on BGP path selection
   - Enables bastion access to VMs with active-active or failover scenarios
-- **VM networks (CUDN)** - Layer2 ClusterUserDefinedNetwork with **shared CIDR for failover**:
+- **VM networks (CUDN)** - Layer2 ClusterUserDefinedNetwork with **GitOps management and shared CIDR for failover**:
+  - **GitOps managed:** CUDN configuration in Git, synced via ArgoCD
   - **Shared network:** 192.168.100.0/24 (advertised by both hub and managed clusters)
   - Both clusters advertise the same prefix to their Route Servers
   - Transit Gateway learns from both and selects best path dynamically
   - Internet egress for KubeVirt VMs via OVN overlay
   - BGP route advertisements via VPC Route Server
   - VRF isolation (bgp-control, cudn-net) for traffic separation
-- **EC2 FRR routers (Optional)** - Legacy routing approach, superseded by VPC Route Server
+- **EC2 FRR routers** - BGP hub with GRE tunnels to Transit Gateway:
+  - Acts as route reflector between OpenShift workers, Route Server, and Transit Gateway
+  - Provides GRE tunnel connectivity for bastion-to-VM routing via TGW
+  - Three BGP sessions per router: iBGP (OpenShift), eBGP (Route Server), eBGP (TGW)
+  - Fully automated deployment and configuration
 
 ### Key Features
 
@@ -66,6 +72,14 @@ ansible-playbook -i inventory/hosts.yml playbooks/site.yml
 ```
 
 See [USAGE.md](USAGE.md) for detailed instructions.
+
+### Validate CUDN GitOps Deployment
+
+To validate the GitOps approach, see [CUDN_GITOPS_VALIDATION.md](CUDN_GITOPS_VALIDATION.md) for step-by-step commands to:
+- Clean up existing CUDN resources
+- Deploy via GitOps (run playbook 15)
+- Verify ArgoCD Applications and Git repository
+- Test GitOps workflow (modify via Git, self-healing)
 
 ## Architecture
 
@@ -110,7 +124,7 @@ Zero Downtime: Automatic rerouting when one cluster fails
 
 ## Deployment Phases
 
-The deployment is organized into 18 sequential phases (Phase 07 is optional and skipped by default):
+The deployment is organized into 20 sequential phases:
 
 | Phase | Playbook | Description | Time |
 |-------|----------|-------------|------|
@@ -120,16 +134,19 @@ The deployment is organized into 18 sequential phases (Phase 07 is optional and 
 | 04 | `04-openshift-install.yml` | Install hub & managed clusters in tmux (parallel) | 60-90 min |
 | 05 | `05-acm-setup.yml` | Deploy Advanced Cluster Management on hub | 15 min |
 | 06 | `06-import-cluster.yml` | Import managed cluster into ACM | 5 min |
-| 07 | `07-frr-routers.yml` | **(SKIPPED)** EC2 FRR routers - superseded by VPC Route Server | 0 min |
+| 07 | `07-frr-routers.yml` | Deploy EC2 FRR routers (BGP hub for TGW connectivity) | 5-10 min |
 | 08 | `08-bare-metal-machinesets.yml` | Deploy c5.metal nodes to both clusters | 20-30 min |
 | 09 | `09-odf-setup.yml` | Deploy OpenShift Data Foundation (Ceph storage) | 20-30 min |
 | 10 | `10-virtualization-policy.yml` | Deploy OpenShift Virtualization via ACM policy | 5-10 min |
 | 11 | `11-gitea-deployment.yml` | Deploy Gitea Git server via Helm on hub | 5-10 min |
+| 11a | `11a-openshift-gitops.yml` | Install OpenShift GitOps (ArgoCD) on hub cluster | 5-8 min |
 | 12 | `12-cert-manager-setup.yml` | Install cert-manager & Let's Encrypt certificates | 10-15 min |
 | 13 | `13-virt-git-sync-setup.yml` | Deploy virt-git-sync operator for GitOps VMs | 5 min |
 | 14 | `14-bgp-configuration.yml` | Configure BGP sessions & worker routing | 10-15 min |
 | 15 | `15-cudn-network.yml` | Create VM network (CUDN) with bridge & NAD | 5-10 min |
+| 15a-15c | `15a-c-cudn-*.yml` | Placeholder playbooks (functionality in phases 14-15) | 0 min |
 | 16 | `16-transit-gateway-setup.yml` | Create Transit Gateway for cross-VPC routing | 5-10 min |
+| 07a | `07a-ec2-router-bgp-config.yml` | Configure EC2 router GRE tunnels and BGP sessions | 5-10 min |
 | 17 | `17-route-server-setup.yml` | Deploy VPC Route Servers for dynamic BGP | 5-10 min |
 | 18 | `18-route-server-bgp.yml` | Configure TGW Connect & worker BGP peering | 10-15 min |
 | 19 | `19-windows-instance.yml` | Deploy Windows instance for failover testing | 10-15 min |
@@ -141,14 +158,34 @@ The deployment is organized into 18 sequential phases (Phase 07 is optional and 
 - **Phases 01-03**: Infrastructure setup (AWS resources, bastion configuration)
 - **Phase 04**: Core OpenShift installation (longest phase, runs in tmux for resilience)
 - **Phases 05-06**: ACM setup and cluster management
-- **Phase 07**: SKIPPED (EC2 FRR routers superseded by VPC Route Server)
+- **Phase 07**: EC2 FRR routers deployment (BGP hub for Transit Gateway connectivity)
 - **Phases 08-09**: Bare metal nodes and persistent storage (ODF)
-- **Phases 10-13**: OpenShift Virtualization and GitOps tooling
+- **Phases 10-13**: OpenShift Virtualization, GitOps (ArgoCD), and automation tooling
 - **Phases 14-15**: BGP configuration and VM network (CUDN)
-- **Phase 16**: Transit Gateway with VPC attachments (replaces VPC peering)
-- **Phase 17**: VPC Route Servers in all three VPCs (replaces EC2 routers)
-- **Phase 18**: TGW Connect with dynamic BGP routing (shared CUDN prefix)
+- **Phase 16**: Transit Gateway with VPC attachments and TGW Connect peers
+- **Phase 07a**: EC2 router GRE tunnels and BGP configuration (requires TGW Connect IPs)
+- **Phase 17**: VPC Route Servers in all three VPCs for native AWS routing
+- **Phase 18**: TGW Connect BGP peering and worker Route Server configuration
 - **Phase 19**: Windows instance in bastion VPC for failover testing
+
+### Hybrid Routing Architecture
+
+This deployment uses a **hybrid routing architecture** where EC2 routers and VPC Route Servers work together:
+
+- **EC2 FRR Routers**: Act as BGP hub/route reflector with three sessions:
+  - iBGP with OpenShift worker nodes (receive CUDN routes)
+  - eBGP with VPC Route Server (advertise CUDN routes)
+  - eBGP with Transit Gateway via GRE tunnel (advertise CUDN routes for bastion access)
+  
+- **VPC Route Servers**: Provide native AWS dynamic BGP routing:
+  - Automatically update VPC route tables based on BGP advertisements
+  - Enable ECMP multipath routing support
+  - Deployed in hub, managed, and bastion VPCs
+
+- **Transit Gateway**: Enables cross-VPC connectivity:
+  - Connects bastion VPC to cluster VPCs for VM access
+  - Learns CUDN routes from both clusters via EC2 routers
+  - Provides automatic failover based on BGP path selection
 
 ### BGP Router NAT Configuration with Split Routing
 

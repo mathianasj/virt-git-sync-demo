@@ -1,0 +1,8 @@
+---
+# Handlers for router_bgp role
+
+- name: restart frr
+  shell: |
+    ssh -i ~/.ssh/{{ bastion_key_name }} -o StrictHostKeyChecking=no {{ bastion_user }}@{{ bastion_public_ip }} \
+      "ssh -o StrictHostKeyChecking=no ec2-user@{{ router_ip }} 'sudo systemctl restart frr'"
+  delegate_to: localhost
